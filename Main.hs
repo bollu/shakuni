@@ -121,10 +121,9 @@ choose as = do
     return $ as !! ix
 
 plor :: [PL a] -> PL a
-plor pls = do
-    pl <- choose pls
-    pl
-
+plor plas = do
+    as <- sequence plas
+    choose as
 
 -- | Run one step of MH on a distribution to obtain a (correlated) sample
 mhStep :: (a -> Float) -- ^ function to score sample with, proportional to distribution
@@ -146,6 +145,12 @@ instance MCMC Float where
     arbitrary = 0
     -- map [0, 1) -> (-infty, infty)
     uniform2val v = tan (-pi/2 + pi * v)
+
+
+instance MCMC Int where
+    arbitrary = 0
+    -- map [0, 1) -> (-infty, infty)
+    uniform2val v = floor $ tan (-pi/2 + pi * v)
 
 
 
@@ -196,12 +201,6 @@ distribution n pl = do
     return $ D $ \a -> P (occurFrac as a)
 
 
--- | keep sampling till we get something we can accept?
--- This should work, right?
-condition :: (a -> Bool) -> PL a -> PL a
-condition c pl = do
-    a <- pl
-    if c a then return a else condition c pl -- ^ will spend far too much time just rejecting things.
 
 -- | Given scores which add up to 1, sample. Notice that the old probability distribution will be
 -- an envelope of the new one, since all we can do is "multiply" the old distribution.
@@ -213,6 +212,9 @@ score scorer pa = do
     -- while sampling from the old distribution? Does this actually work??
     mh scorer (const pa) arbitrary
 
+-- | use the scoring mechanism to condition
+condition :: MCMC a => (a -> Bool) -> PL a -> PL a
+condition c pl = score (\a -> if c a then 1.0 else 0.0) pl
 
 
 
@@ -221,6 +223,9 @@ coin :: Float -> PL Int -- 1 with prob. p1, 0 with prob. (1 - p1)
 coin p1 = do
     Sample01 (\f -> Ret $ if f < p1 then 1 else 0)
 
+-- | fair dice
+dice :: PL Int
+dice = choose [1, 2, 3, 4, 5, 6]
 
 
 
@@ -377,11 +382,12 @@ predictCoinBias flips = do
                 mflip <- coin b :: PL Int
                 let correct = dflip == mflip :: Bool
                 let c bcur = let delta = abs(bcur - b)
+                                 range = 0.3
                              in if correct
-                                then delta <= 0.1 -- allow those biases that are within 0.4
-                                else delta >= 0.9 -- if this bias is wrong, only allow those biases that are far enough from this.
-                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta) * 10 else (delta) * 10
-                -- condition c pbias)
+                                then delta <= range -- allow those biases that are within 0.4
+                                else delta >= 1.0 - range -- if this bias is wrong, only allow those biases that are far enough from this.
+                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta) else (delta)
+                -- condition c sample01)
                 score scorer sample01)
                 flips
     -- | Return the program that chooses uniformly from these trials. Is this even sane??
@@ -390,18 +396,25 @@ predictCoinBias flips = do
     plor (sample01:ps)
 
 
-
-
-
 main :: IO ()
 main = do
+    let g = mkStdGen 1
+
     printCoin 0.01
     printCoin 0.99
     printCoin 0.5
     printCoin 0.7
 
+    let (mcmcsamples, _) = samples 10 g (dice)
+    printSamples "fair dice" (fromIntegral <$> mcmcsamples)
+
+
+    putStrLn $ "biased dice : (x == 1 || x == 6)"
+    let (mcmcsamples, _) = samples 10 g (condition (\x -> x == 1 || x == 6) dice)
+    putStrLn $ "biased dice samples: " <> show mcmcsamples
+    printSamples "bised dice: " (fromIntegral <$> mcmcsamples)
+
     putStrLn $ "normal distribution using central limit theorem: "
-    let g = mkStdGen 1
     let (nsamples, _) = samples 1000 g normal
     -- printSamples "normal: " nsamples
     printHistogram nsamples
@@ -425,22 +438,26 @@ main = do
     printHistogram mcmcsamples
 
 
-    putStrLn $ "bias distribution with supplied with [0]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 1000 0))
+    putStrLn $ "bias distribution with supplied with [0] x 10"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 10 0))
     printHistogram mcmcsamples
 
-    putStrLn $ "bias distribution with supplied with [1]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 1000 1))
+    putStrLn $ "bias distribution with supplied with [1] x 2"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 2 1))
+    printHistogram mcmcsamples
+
+    putStrLn $ "bias distribution with supplied with [1] x 30"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 30 1))
     printHistogram mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [0, 1]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 1000 [0, 1]))
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 10 [0, 1]))
     printHistogram mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [1, 0]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 1000 [1, 0]))
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 20 [1, 0]))
     printHistogram mcmcsamples
 
     putStrLn $ "there is some kind of exponentiation going on here, where adding a single sample makes things exponentially slower"
