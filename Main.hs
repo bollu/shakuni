@@ -6,6 +6,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
 import System.Random
+import Control.Applicative
 import Data.List(sort, nub)
 import Data.Proxy
 import Control.Monad (replicateM)
@@ -111,6 +112,19 @@ instance Functor PL where
 sample01 :: PL Float
 sample01 = Sample01 Ret
 
+-- | A way to choose uniformly. Maybe slightly biased due to an off-by-one ;)
+choose :: [a] -> PL a
+choose as = do
+    let l = length as
+    u <- sample01
+    let ix = floor $ u /  (1.0 / fromIntegral l)
+    return $ as !! ix
+
+plor :: [PL a] -> PL a
+plor pls = do
+    pl <- choose pls
+    pl
+
 
 -- | Run one step of MH on a distribution to obtain a (correlated) sample
 mhStep :: (a -> Float) -- ^ function to score sample with, proportional to distribution
@@ -148,9 +162,6 @@ mhD (D d) = do
     let scorer = (unP . d)
     let proposal _ = uniform2val <$> sample01
     mh scorer proposal arbitrary
-
-
-
 
 
 -- | Run the probabilistic value to get a sample
@@ -331,6 +342,7 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 
 
 
+
 -- | A distribution over coin biases, given the data of the coin
 -- flips seen so far. 1 or 0
 -- TODO: Think of using CPS to make you be able to score the distribution
@@ -343,6 +355,8 @@ predictCoinBias flips = do
     --  we need to somehow run "n experiments in parallel" and then gather
     --  their results. ie, we need something that does [PL a] -> PL a.
     --  We need to gather the evidence in a "Fair way" (uniformly sample?)
+
+    {-
     foldl (\pbias dflip -> do
                 b <- pbias
                 mflip <- coin b :: PL Int
@@ -356,6 +370,24 @@ predictCoinBias flips = do
                 score scorer pbias)
           sample01
           flips
+    -}
+
+    let ps = map (\dflip -> do
+                b <- sample01
+                mflip <- coin b :: PL Int
+                let correct = dflip == mflip :: Bool
+                let c bcur = let delta = abs(bcur - b)
+                             in if correct
+                                then delta <= 0.1 -- allow those biases that are within 0.4
+                                else delta >= 0.9 -- if this bias is wrong, only allow those biases that are far enough from this.
+                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta) * 10 else (delta) * 10
+                -- condition c pbias)
+                score scorer sample01)
+                flips
+    -- | Return the program that chooses uniformly from these trials. Is this even sane??
+    -- I think the probabilities get multiplied, to be able to sample one thing, right?
+    -- Nice, I can write an "alternative-like instance" for this
+    plor (sample01:ps)
 
 
 
@@ -393,17 +425,22 @@ main = do
     printHistogram mcmcsamples
 
 
-    putStrLn $ "bias distribution with supplied with [False]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 2 0))
+    putStrLn $ "bias distribution with supplied with [0]"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 1000 0))
     printHistogram mcmcsamples
 
-    putStrLn $ "bias distribution with supplied with [True, False]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias [1, 0])
+    putStrLn $ "bias distribution with supplied with [1]"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 1000 1))
     printHistogram mcmcsamples
 
 
-    putStrLn $ "bias distribution with supplied with [False, True]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias [0, 1])
+    putStrLn $ "bias distribution with supplied with [0, 1]"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 1000 [0, 1]))
+    printHistogram mcmcsamples
+
+
+    putStrLn $ "bias distribution with supplied with [1, 0]"
+    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 1000 [1, 0]))
     printHistogram mcmcsamples
 
     putStrLn $ "there is some kind of exponentiation going on here, where adding a single sample makes things exponentially slower"
