@@ -196,9 +196,8 @@ condition c pl = do
 -- an envelope of the new one, since all we can do is "multiply" the old distribution.
 -- So we can use the old distribution as the proposal distribution, and use
 -- the _new distribution_ as the scorer.
-score :: MCMC a => D a -> PL a -> PL a
-score d pa = do
-    let scorer a = unP . runD d $ a
+score :: MCMC a => (a -> Float) -> PL a -> PL a
+score scorer pa = do
     -- | run metropolis hastings with the new distribution as the scorer
     -- while sampling from the old distribution? Does this actually work??
     mh scorer (const pa) arbitrary
@@ -331,6 +330,7 @@ nmul :: Sym -> (Node, Node) -> Node
 nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 
 
+
 -- | A distribution over coin biases, given the data of the coin
 -- flips seen so far. 1 or 0
 -- TODO: Think of using CPS to make you be able to score the distribution
@@ -339,6 +339,10 @@ predictCoinBias :: [Int] -> PL Float
 predictCoinBias flips = do
     --foldM
     --  :: (Monad m, Foldable t) => (b -> a -> m b) -> b -> t a -> m b
+    --  v the monadic computation puts too much emphasis on the first sample.
+    --  we need to somehow run "n experiments in parallel" and then gather
+    --  their results. ie, we need something that does [PL a] -> PL a.
+    --  We need to gather the evidence in a "Fair way" (uniformly sample?)
     foldl (\pbias dflip -> do
                 b <- pbias
                 mflip <- coin b :: PL Int
@@ -347,9 +351,9 @@ predictCoinBias flips = do
                              in if correct
                                 then delta <= 0.1 -- allow those biases that are within 0.4
                                 else delta >= 0.9 -- if this bias is wrong, only allow those biases that are far enough from this.
-                let dist = D (\bias -> let delta = abs (bias - b) in  P (if correct then 1 - delta else delta))
+                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta)**3 else (delta)**3
                 -- condition c pbias)
-                score dist pbias)
+                score scorer pbias)
           sample01
           flips
 
