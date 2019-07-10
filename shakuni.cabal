@@ -51,6 +51,7 @@ extra-source-files:  CHANGELOG.md
 executable shakuni
   -- .hs or .lhs file containing the Main module.
   main-is:             Main.hs
+  ghc-options: -threaded -rtsopts
 
   -- Modules included in this executable, other than Main.
   -- other-modules:
@@ -59,7 +60,7 @@ executable shakuni
   other-extensions:    GeneralizedNewtypeDeriving, GADTs, StandaloneDeriving, FlexibleContexts, FlexibleInstances, UndecidableInstances, DeriveFunctor
 
   -- Other library packages from which modules are imported.
-  build-depends:       base ^>=4.10.1.0, random ^>=1.1, containers ^>=0.5.10.2
+  build-depends:       base ^>=4.10.1.0, random ^>=1.1, containers ^>=0.5.10.2, parallel
 
   -- Directories containing source files.
   -- hs-source-dirs:

@@ -1,3 +1,4 @@
+-- {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -5,6 +6,10 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE StrictData #-}
+{-# LANGUAGE Strict #-}
+import Control.Parallel
 import System.Random
 import Control.Applicative
 import Data.List(sort, nub)
@@ -88,25 +93,26 @@ class Contravariant f where
 data PL next where
     Ret :: next -> PL next -- ^ return  a value
     Sample01 :: (Float -> PL next) -> PL next -- ^ sample uniformly from a [0, 1) distribution
+    SampleAp :: PL (a -> b) -> PL a -> PL b -- ^ create a node to perform this in parallel
+    SampleBind :: PL a -> (a -> PL b) -> PL b -- ^ create a node to perform this sequentially
 
 
 instance Monad PL where
   return = Ret
-  (Ret a) >>= f = f a
-  (Sample01 float2plnext) >>= next2next' =
-      Sample01 $ \f -> float2plnext f >>= next2next'
+  -- (Ret a) >>= f = f a
+  -- (Sample01 float2plnext) >>= next2next' =
+  --     Sample01 $ \f -> float2plnext f >>= next2next'
+  (>>=) = SampleBind
+
 
 instance Applicative PL where
-    pure = return
-    ff <*> fx = do
-        f <- ff
-        x <- fx
-        return $ f x
+    pure = Ret
+    ff <*> fx = SampleAp ff fx
 
 instance Functor PL where
     fmap f plx = do
          x <- plx
-         return $ f x
+         pure $ f x
 
 -- | operation to sample from [0, 1)
 sample01 :: PL Float
@@ -133,7 +139,7 @@ mhStep :: (a -> Float) -- ^ function to score sample with, proportional to distr
 mhStep f q a = do
     a' <- q a
     let alpha = f a' / f a -- acceptance ratio
-    u <- sample01
+    u <-  sample01
     return $ if u <= alpha then a' else a
 
 -- Typeclass that can provide me with data to run MCMC on it
@@ -173,13 +179,23 @@ mhD (D d) = do
 sample :: RandomGen g => g -> PL a -> (a, g)
 sample g (Ret a) = (a, g)
 sample g (Sample01 f2plnext) = let (f, g') = random g in sample g' (f2plnext f)
+sample g (SampleAp ff fx) =
+    let -- (g1, g2) = split g
+        (f, _) = sample g ff
+        -- (x, g3) =  sample g2 fx
+        xg3@(x, g3) = sample g fx
+    in f `par` (xg3 `par` (f x, g3))
+
+sample g (SampleBind fa a2fb)  =
+    let (a, g1) = sample g fa
+    in sample g1 (a2fb a)
 
 
 -- | Sample n values from the distribution
 samples :: RandomGen g => Int -> g -> PL a -> ([a], g)
 samples 0 g _ = ([], g)
-samples n g pl = let (a, g') = sample g pl
-                     (as, g'') = samples (n - 1) g' pl
+samples n g pla = let (a, g') = sample g pla
+                      (as, g'') = samples (n - 1) g' pla
                  in (a:as, g'')
 
 -- | count fraction of times value occurs in list
@@ -207,21 +223,21 @@ distribution n pl = do
 -- So we can use the old distribution as the proposal distribution, and use
 -- the _new distribution_ as the scorer.
 score :: MCMC a => (a -> Float) -> PL a -> PL a
-score scorer pa = do
+score !scorer !pa =
     -- | run metropolis hastings with the new distribution as the scorer
     -- while sampling from the old distribution? Does this actually work??
     mh scorer (const pa) arbitrary
 
 -- | use the scoring mechanism to condition
 condition :: MCMC a => (a -> Bool) -> PL a -> PL a
-condition c pl = score (\a -> if c a then 1.0 else 0.0) pl
+condition !c !pl = score (\a -> if c a then 1.0 else 0.0) pl
 
 
 
 -- | biased coin
 coin :: Float -> PL Int -- 1 with prob. p1, 0 with prob. (1 - p1)
-coin p1 = do
-    Sample01 (\f -> Ret $ if f < p1 then 1 else 0)
+coin !p1 = do
+    Sample01 (\f -> Ret $ if f <= p1 then 1 else 0)
 
 -- | fair dice
 dice :: PL Int
@@ -269,7 +285,7 @@ printCoin bias = do
 
 -- | Create normal distribution as sum of uniform distributions.
 normal :: PL Float
-normal =  fromIntegral . sum <$> (replicateM 5 (coin 0.5))
+normal =  fromIntegral . sum <$> (replicateM 6000 (coin 0.5))
 
 
 -- | This file can be copy-pasted and will run!
