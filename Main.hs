@@ -1,4 +1,4 @@
--- {-# LANGUAGE ApplicativeDo #-}
+{-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -99,9 +99,6 @@ data PL next where
 
 instance Monad PL where
   return = Ret
-  -- (Ret a) >>= f = f a
-  -- (Sample01 float2plnext) >>= next2next' =
-  --     Sample01 $ \f -> float2plnext f >>= next2next'
   (>>=) = SampleBind
 
 
@@ -110,9 +107,10 @@ instance Applicative PL where
     ff <*> fx = SampleAp ff fx
 
 instance Functor PL where
-    fmap f plx = do
-         x <- plx
-         pure $ f x
+    fmap f (Ret x) = Ret (f x)
+    fmap f (Sample01 float2pla) = Sample01 ((fmap f) .  float2pla)
+    fmap f (SampleAp pla2b pla) = SampleAp (fmap (f . ) pla2b) pla
+    fmap f (SampleBind pla a2plb) = SampleBind pla ((fmap f)   .  a2plb)
 
 -- | operation to sample from [0, 1)
 sample01 :: PL Float
@@ -180,9 +178,7 @@ sample :: RandomGen g => g -> PL a -> (a, g)
 sample g (Ret a) = (a, g)
 sample g (Sample01 f2plnext) = let (f, g') = random g in sample g' (f2plnext f)
 sample g (SampleAp ff fx) =
-    let -- (g1, g2) = split g
-        (f, _) = sample g ff
-        -- (x, g3) =  sample g2 fx
+    let (f, _) = sample g ff
         xg3@(x, g3) = sample g fx
     in f `par` (xg3 `par` (f x, g3))
 
@@ -285,7 +281,7 @@ printCoin bias = do
 
 -- | Create normal distribution as sum of uniform distributions.
 normal :: PL Float
-normal =  fromIntegral . sum <$> (replicateM 6000 (coin 0.5))
+normal =  fromIntegral . sum <$> (replicateM 100 (coin 0.5))
 
 
 -- | This file can be copy-pasted and will run!
