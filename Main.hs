@@ -90,27 +90,29 @@ polyD p = D $ \f -> P $ if 1 <= f && f <= 2 then (f ** p) * (p + 1) / (2 ** (p+1
 class Contravariant f where
   cofmap :: (b -> a) -> f a -> f b
 
-data PL next where
-    Ret :: next -> PL next -- ^ return  a value
-    Sample01 :: (Float -> PL next) -> PL next -- ^ sample uniformly from a [0, 1) distribution
-    SampleAp :: PL (a -> b) -> PL a -> PL b -- ^ create a node to perform this in parallel
-    SampleBind :: PL a -> (a -> PL b) -> PL b -- ^ create a node to perform this sequentially
-
-
-instance Monad PL where
-  return = Ret
-  (>>=) = SampleBind
-
-
-instance Applicative PL where
-    pure = Ret
-    ff <*> fx = SampleAp ff fx
+data PL x where
+    Ret :: x -> PL x
+    Sample01 :: (Float -> PL x) -> PL x
+    Score :: Float -> PL x -> PL x
 
 instance Functor PL where
-    fmap f (Ret x) = Ret (f x)
-    fmap f (Sample01 float2pla) = Sample01 ((fmap f) .  float2pla)
-    fmap f (SampleAp pla2b pla) = SampleAp (fmap (f . ) pla2b) pla
-    fmap f (SampleBind pla a2plb) = SampleBind pla ((fmap f)   .  a2plb)
+  fmap f (Ret x) = Ret (f x)
+  fmap f (Sample01 r2plx) = Sample01 (\r -> fmap f (r2plx r))
+  fmap f (Score s plx) = Score s (fmap f plx)
+
+instance Applicative PL where
+  pure = return
+  (<*>) = ap
+
+instance Monad PL where
+  return = undefined
+  (>>=) = undefined
+
+score :: Float -> PL ()
+score f = Score f (Ret ())
+
+condition :: Bool -> PL ()
+condition b = score $ if b then 1 else 0
 
 -- | operation to sample from [0, 1)
 sample01 :: PL Float
@@ -173,6 +175,42 @@ mhD (D d) = do
     mh scorer proposal arbitrary
 
 
+
+data Particle a = Particle { pvalue :: a, pcurscore :: Float }
+  deriving(Eq, Show, Ord)
+
+
+scoreParticle :: Float -> Particle a -> Particle a
+scoreParticle s' (Particle a s) = Particle a (s * s')
+
+instance Functor Particle where
+  fmap f (Particle a s) = Particle (f a) s
+
+
+newtype Particles a = Particles [Particle a]
+
+scoreParticles :: Float -> Particles a -> Particles a
+scoreParticles s (Particles ps) = Particles $ map (scoreParticle s) ps
+
+instance Functor Particles where
+  fmap f (Particles ps) = Particles $ fmap (fmap f) ps
+
+newParticles :: a -> Particles a
+newParticles a = Particles $ [Particle a 1.0]
+
+sample_ :: RandomGen g => g -> PL x -> (g, Particles x)
+sample_ g (Ret x) = (g, newParticles x)
+sample_ g (Sample01 f2plx) =
+  let (r, g') = random g
+  in sample_ g' (f2plx r)
+sample_ g (Score s plx) =
+  let (g', ps) = sample_ g plx
+   in (g', scoreParticles s ps)
+
+samples :: RandomGen g => Int -> g -> PL a -> ([a], g)
+samples = undefined
+
+{-
 -- | Run the probabilistic value to get a sample
 sample :: RandomGen g => g -> PL a -> (a, g)
 sample g (Ret a) = (a, g)
@@ -193,6 +231,7 @@ samples 0 g _ = ([], g)
 samples n g pla = let (a, g') = sample g pla
                       (as, g'') = samples (n - 1) g' pla
                  in (a:as, g'')
+-}
 
 -- | count fraction of times value occurs in list
 occurFrac :: (Eq a) => [a] -> a -> Float
@@ -218,22 +257,23 @@ distribution n pl = do
 -- an envelope of the new one, since all we can do is "multiply" the old distribution.
 -- So we can use the old distribution as the proposal distribution, and use
 -- the _new distribution_ as the scorer.
-score :: MCMC a => (a -> Float) -> PL a -> PL a
-score !scorer !pa =
-    -- | run metropolis hastings with the new distribution as the scorer
-    -- while sampling from the old distribution? Does this actually work??
-    mh scorer (const pa) arbitrary
-
--- | use the scoring mechanism to condition
-condition :: MCMC a => (a -> Bool) -> PL a -> PL a
-condition !c !pl = score (\a -> if c a then 1.0 else 0.0) pl
+-- score :: MCMC a => (a -> Float) -> PL a -> PL a
+-- score !scorer !pa =
+--     -- | run metropolis hastings with the new distribution as the scorer
+--     -- while sampling from the old distribution? Does this actually work??
+--     mh scorer (const pa) arbitrary
+--
+-- -- | use the scoring mechanism to condition
+-- condition :: MCMC a => (a -> Bool) -> PL a -> PL a
+-- condition !c !pl = score (\a -> if c a then 1.0 else 0.0) pl
 
 
 
 -- | biased coin
 coin :: Float -> PL Int -- 1 with prob. p1, 0 with prob. (1 - p1)
 coin !p1 = do
-    Sample01 (\f -> Ret $ if f <= p1 then 1 else 0)
+    f <- sample01
+    Ret $ if f <= p1 then 1 else 0
 
 -- | fair dice
 dice :: PL Int
@@ -366,47 +406,9 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 -- you are sampling from!
 predictCoinBias :: [Int] -> PL Float
 predictCoinBias flips = do
-    --foldM
-    --  :: (Monad m, Foldable t) => (b -> a -> m b) -> b -> t a -> m b
-    --  v the monadic computation puts too much emphasis on the first sample.
-    --  we need to somehow run "n experiments in parallel" and then gather
-    --  their results. ie, we need something that does [PL a] -> PL a.
-    --  We need to gather the evidence in a "Fair way" (uniformly sample?)
-
-    {-
-    foldl (\pbias dflip -> do
-                b <- pbias
-                mflip <- coin b :: PL Int
-                let correct = dflip == mflip :: Bool
-                let c bcur = let delta = abs(bcur - b)
-                             in if correct
-                                then delta <= 0.1 -- allow those biases that are within 0.4
-                                else delta >= 0.9 -- if this bias is wrong, only allow those biases that are far enough from this.
-                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta)**3 else (delta)**3
-                -- condition c pbias)
-                score scorer pbias)
-          sample01
-          flips
-    -}
-
-    let ps = map (\dflip -> do
-                b <- sample01
-                mflip <- coin b :: PL Int
-                let correct = dflip == mflip :: Bool
-                let c bcur = let delta = abs(bcur - b)
-                                 range = 0.3
-                             in if correct
-                                then delta <= range -- allow those biases that are within 0.4
-                                else delta >= 1.0 - range -- if this bias is wrong, only allow those biases that are far enough from this.
-                let scorer bias = let delta = abs (bias - b) in if correct then (1 - delta) else (delta)
-                -- condition c sample01)
-                score scorer sample01)
-                flips
-    -- | Return the program that chooses uniformly from these trials. Is this even sane??
-    -- I think the probabilities get multiplied, to be able to sample one thing, right?
-    -- Nice, I can write an "alternative-like instance" for this
-    plor (sample01:ps)
-
+  b <- sample01
+  forM_ flips $ \f -> score $ if f == 1 then b else (1 - b)
+  return $ b
 
 main :: IO ()
 main = do
@@ -422,7 +424,7 @@ main = do
 
 
     putStrLn $ "biased dice : (x == 1 || x == 6)"
-    let (mcmcsamples, _) = samples 10 g (condition (\x -> x == 1 || x == 6) dice)
+    let (mcmcsamples, _) = samples 10 g (dice >>= \x -> condition (x <= 1 || x >= 6) >> (return x))
     putStrLn $ "biased dice samples: " <> show mcmcsamples
     printSamples "bised dice: " (fromIntegral <$> mcmcsamples)
 
