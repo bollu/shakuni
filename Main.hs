@@ -11,6 +11,7 @@
 {-# LANGUAGE Strict #-}
 import Control.Parallel
 import System.Random
+import Debug.Trace
 import Control.Applicative
 import Data.List(sort, nub)
 import Data.Proxy
@@ -208,7 +209,7 @@ sampleParticle g (Scored pla a2plx) =
 sample :: RandomGen g => g -> PL x -> (x, g)
 sample g plx =
   let (px, g') = sampleParticle g plx
-  in (pvalue px, g)
+  in (pvalue px, g')
 
 -- | Take many samples
 samples :: RandomGen g => Int -> g -> PL x -> ([x], g)
@@ -282,7 +283,7 @@ distribution n pl = do
 coin :: Float -> PL Int -- 1 with prob. p1, 0 with prob. (1 - p1)
 coin !p1 = do
     f <- sample01
-    Ret $ if f <= p1 then 1 else 0
+    Ret $  if f <= p1 then 1 else 0
 
 -- | fair dice
 dice :: PL Int
@@ -325,8 +326,6 @@ printCoin bias = do
     let g = mkStdGen 1
     let (tosses, _) = samples 100 g (coin bias)
     printSamples ("bias: " <> show bias) tosses
-
-
 
 
 -- | Create normal distribution as sum of uniform distributions.
