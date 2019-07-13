@@ -89,16 +89,10 @@ class Contravariant f where
 data PL x where
     Ret :: x -> PL x
     Sample01 :: (Float -> PL x) -> PL x
-    Score :: Float -> PL x -> PL x
-    -- | evaluate the PL and return its score
-    Scored :: PL a -> (Float -> a -> PL x) -> PL x
 
 instance Functor PL where
   fmap f (Ret x) = Ret (f x)
   fmap f (Sample01 r2plx) = Sample01 (\r -> fmap f (r2plx r))
-  fmap f (Score s plx) = Score s (fmap f plx)
-  -- | Think if I need this: I Think I can build the scored infrastructure
-  fmap f (Scored pla a2plx) = Scored pla (\s a -> fmap f (a2plx s a))
 
 instance Applicative PL where
   pure = return
@@ -108,19 +102,29 @@ instance Monad PL where
   return = Ret
   (Ret x) >>= x2ply = x2ply x
   (Sample01 r2plx) >>= x2ply = Sample01 (\r -> r2plx r >>= x2ply)
-  (Score s plx) >>= x2ply = Score s (plx >>= x2ply)
-  (Scored pla sa2plx) >>= x2ply =
-     Scored pla (\s a -> sa2plx s a >>= x2ply)
 
-score :: Float -> PL ()
-score f = Score f (Ret ())
 
--- | Get a scored sample
-scored :: PL x -> PL (Float, x)
-scored plx = Scored plx (\s a -> return (s, a))
+scoreUniform :: PL a -> PL (Particle a)
+scoreUniform pla = do
+  a <- pla
+  return $ (Particle a 1.0)
 
-condition :: Bool -> PL ()
-condition b = score $ if b then 1 else 0
+score :: Float -> PL (Particle ())
+score f = return $ Particle () f
+
+unscore :: PL (Particle a) -> PL a
+unscore = fmap pvalue
+
+multiplyScore :: Float -> PL (Particle a) -> PL (Particle a)
+multiplyScore s pla = fmap (scoreParticle s) pla
+
+
+condition :: Bool -> PL (Particle ())
+condition b = score $ if b then 1.0 else 0.0
+
+
+conditioned :: Bool -> (a -> PL (Particle a))
+conditioned b a = return $ (Particle a $ if b then 1.0 else 0.0)
 
 -- | operation to sample from [0, 1)
 sample01 :: PL Float
@@ -166,40 +170,35 @@ instance Functor Particle where
 
 
 -- | Take a sample using metropolis hastings
-mhStep :: (x -> PL x) -- ^ proposal
-       -> PL x -- ^ current distribution
-       -> PL x -- ^ new distribution. sampled according to scores and proposal
+mhStep :: (x -> PL (Particle x)) -- ^ proposal
+       -> PL (Particle x) -- ^ current distribution
+       -> PL (Particle x) -- ^ new distribution. sampled according to scores and proposal
                --  of current distribution
 mhStep x2proposal mx =  do
-  (s, x) <- scored $ mx
-  (s', x') <- scored $ x2proposal x
+  (Particle x s) <- mx
+  (Particle x' s') <- x2proposal x
   let alpha = s' / s
   u <-  sample01
-  return $ if u < alpha then x' else x
+  return $ if u < alpha then (Particle x' s') else (Particle x s)
 
 mhSteps ::  Int -- ^ number of steps
-  -> (x -> PL x) -- ^ proposal
-  -> PL x -- ^ current distribution
-  -> PL x -- ^ new distribution
+  -> (x -> PL (Particle x)) -- ^ proposal
+  -> PL (Particle x) -- ^ current distribution
+  -> PL (Particle x) -- ^ new distribution
 mhSteps steps x2proposal mx = (compose steps $ mhStep x2proposal) mx
 
--- | Convert a sampler into a weighted sampler by using metropolis-hastings
-mh :: MCMC x => PL x -> PL x
-mh plx = mhSteps 100 (const plx) plx
+-- | Convert a weighted sampler into a regular sampler by sampling using
+-- metropolis-hastings
+mh :: MCMC x => PL (Particle x) -> PL x
+mh plx = unscore $  mhSteps 10 (const plx) plx
 
 
 mhD :: MCMC x => D x -> PL x
-mhD d = mhSteps 200
-        (const $ do
-          x <- uniform2val <$> sample01
-          score $ unP $ runD d x
-          return $ x
-         )
-        (do
-          x <- uniform2val <$> sample01
-          score $ unP $ runD d x
-          return $ x
-         )
+mhD d = let pl = do
+                   x <- uniform2val <$> sample01
+                   let s = unP $ runD d x
+                   return $ Particle x s
+        in unscore $ mhSteps 200 (const pl) pl
 
 
 -- | Treat the program as a way to generate a particle
@@ -208,12 +207,6 @@ sampleParticle g (Ret x) = (Particle x 1.0, g)
 sampleParticle g (Sample01 f2plx) =
   let (r, g') = random g
   in sampleParticle g' (f2plx r)
-sampleParticle g (Score s plx) =
-  let (p, g') = sampleParticle g plx
-   in (scoreParticle s p, g')
-sampleParticle g (Scored pla a2plx) =
-  let (Particle a score, g') = sampleParticle g pla
-   in sampleParticle g' (a2plx score a)
 
 -- | Get a single sample
 sample :: RandomGen g => g -> PL x -> (x, g)
@@ -392,13 +385,13 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 
 -- | A distribution over coin biases, given the data of the coin
 -- flips seen so far. 1 or 0
--- TODO: Think of using CPS to make you be able to score the distribution
+-- TODO: Think of using CPS to make you be able to scoreDistribution the distribution
 -- you are sampling from!
 predictCoinBias :: [Int] -> PL Float
 predictCoinBias flips = mh $ do
   b <- sample01
-  forM_ flips $ \f -> score $ if f == 1 then b else (1 - b)
-  return $ b
+  let s = getProduct $ foldMap (\f -> Product $ if f == 1 then b else (1 - b)) flips
+  return $ Particle b s
 
 main :: IO ()
 main = do
@@ -414,7 +407,9 @@ main = do
 
 
     putStrLn $ "biased dice : (x == 1 || x == 6)"
-    let (mcmcsamples, _) = samples 10 g (dice >>= \x -> condition (x <= 1 || x >= 6) >> (return x))
+    let (mcmcsamples, _) =
+          samples 10 g
+            (mh $ (dice >>= \x -> conditioned (x <= 1 || x >= 6) x))
     putStrLn $ "biased dice samples: " <> show mcmcsamples
     printSamples "bised dice: " (fromIntegral <$> mcmcsamples)
 
