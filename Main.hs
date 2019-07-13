@@ -20,15 +20,10 @@ import Data.Monoid
 import Control.Monad
 import qualified Data.Map as M
 
--- | Loop a monadic computation.
-mLoop :: Monad m =>
-      (a -> m a) -- ^ loop
-      -> Int -- ^ number of times to run
-      -> a -- initial value
-      -> m a -- final value
-mLoop _ 0 a = return a
-mLoop f n a = f a >>= mLoop f (n - 1)
 
+compose :: Int -> (a -> a) -> (a -> a)
+compose 0 f = id
+compose n f = f . compose (n - 1) f
 
 -- | Utility library for drawing sparklines
 
@@ -182,14 +177,29 @@ mhStep x2proposal mx =  do
   u <-  sample01
   return $ if u < alpha then x' else x
 
-mhD :: MCMC a
-   => D a -- ^ arbitrary distribution to sample from
-   -> PL a -- ^ convert the distribution to a sampleable object
-mhD d = mhStep (const (uniform2val <$> sample01)) $  do
-  x <- uniform2val <$> sample01
-  -- | score the sample by this value
-  score $ (unP $ runD d x)
-  return $ x
+mhSteps ::  Int -- ^ number of steps
+  -> (x -> PL x) -- ^ proposal
+  -> PL x -- ^ current distribution
+  -> PL x -- ^ new distribution
+mhSteps steps x2proposal mx = (compose steps $ mhStep x2proposal) mx
+
+-- | Convert a sampler into a weighted sampler by using metropolis-hastings
+mh :: MCMC x => PL x -> PL x
+mh plx = mhSteps 100 (const plx) plx
+
+
+mhD :: MCMC x => D x -> PL x
+mhD d = mhSteps 200
+        (const $ do
+          x <- uniform2val <$> sample01
+          score $ unP $ runD d x
+          return $ x
+         )
+        (do
+          x <- uniform2val <$> sample01
+          score $ unP $ runD d x
+          return $ x
+         )
 
 
 -- | Treat the program as a way to generate a particle
@@ -249,35 +259,6 @@ occurFrac as a =
     let noccur = length (filter (==a) as)
         n = length as
     in (fromIntegral noccur) / (fromIntegral n)
-
--- | Given a sampling rate, return the probability distribution of
--- each value occuring.
--- This is the stupidest thing I have ever written. Consider a distribution
--- over any continuous quantity. This will not work since we will need infinite
--- samples to even begin approaching even a uniform distribution. Anything
--- that needs this is a non-starter.
-distribution :: Eq a => Int -> PL a -> PL (D a)
-distribution n pl = do
-    as <- replicateM n pl
-    return $ D $ \a -> P (occurFrac as a)
-
-
-
--- | Given scores which add up to 1, sample. Notice that the old probability distribution will be
--- an envelope of the new one, since all we can do is "multiply" the old distribution.
--- So we can use the old distribution as the proposal distribution, and use
--- the _new distribution_ as the scorer.
--- score :: MCMC a => (a -> Float) -> PL a -> PL a
--- score !scorer !pa =
---     -- | run metropolis hastings with the new distribution as the scorer
---     -- while sampling from the old distribution? Does this actually work??
---     mh scorer (const pa) arbitrary
---
--- -- | use the scoring mechanism to condition
--- condition :: MCMC a => (a -> Bool) -> PL a -> PL a
--- condition !c !pl = score (\a -> if c a then 1.0 else 0.0) pl
-
-
 
 -- | biased coin
 coin :: Float -> PL Int -- 1 with prob. p1, 0 with prob. (1 - p1)
@@ -414,7 +395,7 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 -- TODO: Think of using CPS to make you be able to score the distribution
 -- you are sampling from!
 predictCoinBias :: [Int] -> PL Float
-predictCoinBias flips = do
+predictCoinBias flips = mh $ do
   b <- sample01
   forM_ flips $ \f -> score $ if f == 1 then b else (1 - b)
   return $ b
