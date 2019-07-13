@@ -94,22 +94,34 @@ data PL x where
     Ret :: x -> PL x
     Sample01 :: (Float -> PL x) -> PL x
     Score :: Float -> PL x -> PL x
+    -- | evaluate the PL and return its score
+    Scored :: PL a -> (Float -> a -> PL x) -> PL x
 
 instance Functor PL where
   fmap f (Ret x) = Ret (f x)
   fmap f (Sample01 r2plx) = Sample01 (\r -> fmap f (r2plx r))
   fmap f (Score s plx) = Score s (fmap f plx)
+  -- | Think if I need this: I Think I can build the scored infrastructure
+  fmap f (Scored pla a2plx) = Scored pla (\s a -> fmap f (a2plx s a))
 
 instance Applicative PL where
   pure = return
   (<*>) = ap
 
 instance Monad PL where
-  return = undefined
-  (>>=) = undefined
+  return = Ret
+  (Ret x) >>= x2ply = x2ply x
+  (Sample01 r2plx) >>= x2ply = Sample01 (\r -> r2plx r >>= x2ply)
+  (Score s plx) >>= x2ply = Score s (plx >>= x2ply)
+  (Scored pla sa2plx) >>= x2ply =
+     Scored pla (\s a -> sa2plx s a >>= x2ply)
 
 score :: Float -> PL ()
 score f = Score f (Ret ())
+
+-- | Get a scored sample
+scored :: PL x -> PL (Float, x)
+scored plx = Scored plx (\s a -> return (s, a))
 
 condition :: Bool -> PL ()
 condition b = score $ if b then 1 else 0
@@ -126,21 +138,6 @@ choose as = do
     let ix = floor $ u /  (1.0 / fromIntegral l)
     return $ as !! ix
 
-plor :: [PL a] -> PL a
-plor plas = do
-    as <- sequence plas
-    choose as
-
--- | Run one step of MH on a distribution to obtain a (correlated) sample
-mhStep :: (a -> Float) -- ^ function to score sample with, proportional to distribution
-  -> (a -> PL a) -- ^ Proposal program
-  -> a -- current sample
-  -> PL a
-mhStep f q a = do
-    a' <- q a
-    let alpha = f a' / f a -- acceptance ratio
-    u <-  sample01
-    return $ if u <= alpha then a' else a
 
 -- Typeclass that can provide me with data to run MCMC on it
 class MCMC a where
@@ -160,21 +157,6 @@ instance MCMC Int where
 
 
 
--- | Run MH to sample from a distribution
-mh :: (a -> Float) -- ^ function to score sample with
- -> (a -> PL a) -- ^ proposal program
- -> a -- ^ current sample
- -> PL a
-mh f q a = mLoop (mhStep f q) 10  $ a
-
--- | Construct a program to sample from an arbitrary distribution using MCMC
-mhD :: MCMC a => D a -> PL a
-mhD (D d) = do
-    let scorer = (unP . d)
-    let proposal _ = uniform2val <$> sample01
-    mh scorer proposal arbitrary
-
-
 
 data Particle a = Particle { pvalue :: a, pcurscore :: Float }
   deriving(Eq, Show, Ord)
@@ -187,28 +169,55 @@ instance Functor Particle where
   fmap f (Particle a s) = Particle (f a) s
 
 
-newtype Particles a = Particles [Particle a]
+-- | Take a sample using metropolis hastings
+mhStep :: (x -> PL x) -- ^ proposal
+       -> PL x -- ^ current distribution
+       -> PL x -- ^ new distribution. sampled according to scores and proposal
+               --  of current distribution
+mhStep x2proposal mx =  do
+  (s, x) <- scored $ mx
+  (s', x') <- scored $ x2proposal x
+  let alpha = s' / s
+  u <-  sample01
+  return $ if u < alpha then x' else x
 
-scoreParticles :: Float -> Particles a -> Particles a
-scoreParticles s (Particles ps) = Particles $ map (scoreParticle s) ps
+mhD :: MCMC a
+   => D a -- ^ arbitrary distribution to sample from
+   -> PL a -- ^ convert the distribution to a sampleable object
+mhD d = mhStep (const (uniform2val <$> sample01)) $  do
+  x <- uniform2val <$> sample01
+  -- | score the sample by this value
+  score $ (unP $ runD d x)
+  return $ x
 
-instance Functor Particles where
-  fmap f (Particles ps) = Particles $ fmap (fmap f) ps
 
-newParticles :: a -> Particles a
-newParticles a = Particles $ [Particle a 1.0]
-
-sample_ :: RandomGen g => g -> PL x -> (g, Particles x)
-sample_ g (Ret x) = (g, newParticles x)
-sample_ g (Sample01 f2plx) =
+-- | Treat the program as a way to generate a particle
+sampleParticle :: RandomGen g => g -> PL x -> (Particle x, g)
+sampleParticle g (Ret x) = (Particle x 1.0, g)
+sampleParticle g (Sample01 f2plx) =
   let (r, g') = random g
-  in sample_ g' (f2plx r)
-sample_ g (Score s plx) =
-  let (g', ps) = sample_ g plx
-   in (g', scoreParticles s ps)
+  in sampleParticle g' (f2plx r)
+sampleParticle g (Score s plx) =
+  let (p, g') = sampleParticle g plx
+   in (scoreParticle s p, g')
+sampleParticle g (Scored pla a2plx) =
+  let (Particle a score, g') = sampleParticle g pla
+   in sampleParticle g' (a2plx score a)
 
-samples :: RandomGen g => Int -> g -> PL a -> ([a], g)
-samples = undefined
+-- | Get a single sample
+sample :: RandomGen g => g -> PL x -> (x, g)
+sample g plx =
+  let (px, g') = sampleParticle g plx
+  in (pvalue px, g)
+
+-- | Take many samples
+samples :: RandomGen g => Int -> g -> PL x -> ([x], g)
+samples 0 g _ = ([], g)
+samples n g plx =
+  let (x, g') = sample g plx
+      (xs, g'') = samples (n-1) g' plx
+   in (x:xs, g'')
+
 
 {-
 -- | Run the probabilistic value to get a sample
@@ -319,6 +328,7 @@ printCoin bias = do
 
 
 
+
 -- | Create normal distribution as sum of uniform distributions.
 normal :: PL Float
 normal =  fromIntegral . sum <$> (replicateM 100 (coin 0.5))
@@ -414,8 +424,8 @@ main :: IO ()
 main = do
     let g = mkStdGen 1
 
-    printCoin 0.01
-    printCoin 0.99
+    printCoin 0.1
+    printCoin 0.8
     printCoin 0.5
     printCoin 0.7
 
@@ -435,7 +445,7 @@ main = do
 
 
     putStrLn $ "normal distribution using MCMC: "
-    let (mcmcsamples, _) = samples 1000 g (mhD $  normalD 0.5)
+    let (mcmcsamples, _) = samples 1000 g (mhD $ normalD 0.5)
     printHistogram mcmcsamples
 
     putStrLn $ "sampling from x^4 with finite support"
@@ -475,4 +485,3 @@ main = do
     printHistogram mcmcsamples
 
     putStrLn $ "there is some kind of exponentiation going on here, where adding a single sample makes things exponentially slower"
-
