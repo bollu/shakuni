@@ -7,8 +7,6 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE StrictData #-}
-{-# LANGUAGE Strict #-}
 import Control.Parallel
 import System.Random
 import Debug.Trace
@@ -18,6 +16,7 @@ import Data.Proxy
 import Control.Monad (replicateM)
 import Data.Monoid
 import Control.Monad
+import Data.Bits
 import qualified Data.Map as M
 
 
@@ -394,6 +393,58 @@ predictCoinBias flips = mh $ do
   b <- sample01
   let s = getProduct $ foldMap (\f -> Product $ if f == 1 then b else (1 - b)) flips
   return $ Score b s
+
+data B = Z | O deriving(Eq, Show)
+type N = Integer
+
+type Cantor = N -> B
+
+cantorBit :: Num a => N -> Cantor -> a
+cantorBit i c = fromInteger. b2n $ c i
+
+-- | truncate a number represented by `cantor` to an integer.
+cantorTrunc :: N -> Cantor -> Integer
+cantorTrunc n c = sum $ [(cantorBit i c) `shiftL` (fromIntegral i) | i <- [0..n]]
+
+-- | Check if two functions defined from the cantor set are equal.
+eqCantor :: Eq x => (Cantor -> x) -> (Cantor -> x) -> Bool
+eqCantor f g = forevery $ \c -> f c == g c
+
+-- | append a bit
+(#) :: Cantor -> B -> Cantor
+a # x = \i -> if i == 0 then x else a (i - 1)
+
+forsome :: (Cantor -> Bool) -> Bool
+forsome p = p (find p)
+
+forevery :: (Cantor -> Bool) -> Bool
+forevery p = not (forsome $ not . p)
+
+find :: (Cantor -> Bool) -> Cantor
+find p = if forsome(\a -> p (a # Z))
+         then find (\a -> p (a # Z)) # Z
+         else find (\a -> p (a # O)) # O
+
+search :: (Cantor -> Bool) -> Maybe Cantor
+search p = if forsome p then Just (find p) else Nothing
+
+z :: Cantor
+z = const Z
+
+b2n :: B -> N
+b2n Z = 0
+b2n O = 1
+
+f, g, h :: Cantor -> Integer
+
+f a = b2n (a (7 * b2n (a 4) +  4 * (b2n (a 7)) + 4))
+
+g a = b2n(a(b2n(a 4) + 11 * (b2n(a 7))))
+
+h a = if a 7 == Z
+      then if a 4 == Z then b2n(a  4) else b2n(a 11)
+      else if a 4 == O  then b2n(a 15) else b2n(a  8)
+
 
 main :: IO ()
 main = do
