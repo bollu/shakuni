@@ -1,3 +1,4 @@
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ApplicativeDo #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE GADTs #-}
@@ -50,84 +51,89 @@ seriesPrintSpark = putStrLn . series2spark
 -- ============
 type F = Float
 -- | probablity density
-newtype P = P { unP :: Float } deriving(Num, Show, Eq, Ord)
+type P = Float
 
 -- | prob. distributions over space a
-newtype D a = D { runD :: a -> P }
+type D a = a -> P
 
 -- | Scale the distribution by a float value
 dscale :: D a -> Float -> D a
-dscale (D d) f = D $ \a -> P $ unP (d a) * f
-
-
--- | Multiply probability distributions together
-dmul :: D a -> D a -> D a
-dmul (D d) (D d') = D $ \a -> d a * d' a
+dscale d f a = f *  d a
 
 uniform :: Int -> D a
-uniform n =
-  D $ \_ -> P $ 1.0 / (fromIntegral $ n)
+uniform n _ = 1.0 / (fromIntegral $ n)
 
-(>$<) :: Contravariant f => (b -> a) -> f a  -> f b
-(>$<) = cofmap
-
-instance Contravariant D where
-  cofmap f (D d) = D (d . f)
 
 -- | Normal distribution with given mean
-normalD :: Float ->  D Float
-normalD mu = D $ \f -> P $ exp (- ((f-mu)^2))
+normalD :: Float -> (Float -> Float)
+normalD mu f  =  exp (- ((f-mu)^2))
 
 -- | Distribution that takes on value x^p for 1 <= x <= 2.  Is normalized
-polyD :: Float -> D Float
-polyD p = D $ \f -> P $ if 1 <= f && f <= 2 then (f ** p) * (p + 1) / (2 ** (p+1) - 1) else 0
+polyD :: Float -> (Float -> Float)
+polyD p f = if 1 <= f && f <= 2 then (f ** p) * (p + 1) / (2 ** (p+1) - 1) else 0
 
-class Contravariant f where
-  cofmap :: (b -> a) -> f a -> f b
+type Random = Float
+type Score = Float
+
+-- | Trace all random choices made when generating this value
+data Trace a = Trace { tval :: a, tscore :: Float, trs :: [Float] }
+
+
+
+
+-- | Lift a pure value into a Trace value
+mkTrace :: a -> Trace a
+mkTrace a = Trace a 1.0 []
+
+-- | multiply a score to a trace
+scoreTrace :: Float -> Trace a -> Trace a
+scoreTrace f Trace{..} = Trace{tscore = tscore * f, ..}
+
+prependRandomnessTrace :: Float -> Trace a -> Trace a
+prependRandomnessTrace r Trace{..} = Trace { trs = r:trs, ..}
 
 data PL x where
     Ret :: x -> PL x
     Sample01 :: (Float -> PL x) -> PL x
+    Score :: Float -> PL x -> PL x
+    Ap :: PL (a -> x) -> PL a -> PL x
 
 instance Functor PL where
   fmap f (Ret x) = Ret (f x)
   fmap f (Sample01 r2plx) = Sample01 (\r -> fmap f (r2plx r))
+  fmap f (Score s plx) = Score s (fmap f plx)
+  fmap f (Ap pla2x pla) = Ap ((f .) <$> pla2x) pla
+
 
 instance Applicative PL where
-  pure = return
-  (<*>) = ap
+  pure = Ret
+  pa2b <*> pa = Ap pa2b pa
+
 
 instance Monad PL where
   return = Ret
   (Ret x) >>= x2ply = x2ply x
   (Sample01 r2plx) >>= x2ply = Sample01 (\r -> r2plx r >>= x2ply)
-
-
-scoreUniform :: PL a -> PL (Score a)
-scoreUniform pla = do
-  a <- pla
-  return $ (Score a 1.0)
-
-score :: Float -> PL (Score ())
-score f = return $ Score () f
-
-unscorePL :: PL (Score a) -> PL a
-unscorePL = fmap unScore
-
-multiplyScore :: Float -> PL (Score a) -> PL (Score a)
-multiplyScore s pla = fmap (scaleScore s) pla
-
-
-condition :: Bool -> PL (Score ())
-condition b = score $ if b then 1.0 else 0.0
-
-
-conditioned :: Bool -> (a -> PL (Score a))
-conditioned b a = return $ (Score a $ if b then 1.0 else 0.0)
+  (Score s plx) >>= x2ply = Score s (plx >>= x2ply)
+  (Ap pla2x pla) >>= x2ply = pla2x >>= \a2x -> pla >>= \a -> x2ply (a2x a)
 
 -- | operation to sample from [0, 1)
 sample01 :: PL Float
 sample01 = Sample01 Ret
+
+score :: Float -> PL ()
+score s = Score s (Ret ())
+
+condition :: Bool -> PL ()
+condition True = score 1
+condition False = score 0
+
+-- | convert a distribution into a PL
+d2pl :: MCMC a => D a -> PL a
+d2pl d = do
+  a <- uniform2val <$> sample01
+  score $  d a
+  return $ a
 
 -- | A way to choose uniformly. Maybe slightly biased due to an off-by-one ;)
 choose :: [a] -> PL a
@@ -137,6 +143,9 @@ choose as = do
     let ix = floor $ u /  (1.0 / fromIntegral l)
     return $ as !! ix
 
+instance MCMC a => MCMC (Trace a) where
+  arbitrary = Trace { tval = arbitrary , tscore = 1.0, trs = []}
+  uniform2val f = Trace { tval = uniform2val f,  tscore = 1.0, trs = []}
 
 -- Typeclass that can provide me with data to run MCMC on it
 class MCMC a where
@@ -155,99 +164,104 @@ instance MCMC Int where
     uniform2val v = floor $ tan (-pi/2 + pi * v)
 
 
+-- | lift a regular computation into the Trace world, where we know what
+-- decisions were taken.
+reifyTrace :: PL x -> PL (Trace x)
+reifyTrace (Ret x) = Ret (mkTrace x)
+reifyTrace (Sample01 plx) = do
+  r <- sample01
+  trx <- reifyTrace $ plx r
+  return $ prependRandomnessTrace r $ trx
+reifyTrace (Score s plx) = do
+  trx <- reifyTrace $ plx
+  return $ scoreTrace s $ trx
+
+-- | run the PL with the randomness provided, and then
+-- return the rest of the proabilistic computation
+injectRandomness :: [Float] -> PL a -> PL a
+injectRandomness _ (Ret x) = Ret x
+injectRandomness (r:rs) (Sample01 r2plx)
+ = injectRandomness rs (r2plx r)
+injectRandomness [] (Sample01 r2plx) = (Sample01 r2plx)
+injectRandomness rs (Score s plx) = Score s $ injectRandomness rs plx
+
+-- | Replace the element of a list at a given index
+replaceListAt :: Int -> a -> [a] -> [a]
+replaceListAt ix a as = let (l, r) = (take (ix - 1) as, drop ix as)
+                         in l ++ [a] ++ r
 
 
-data Score a = Score { unScore :: a, curScore :: Float }
-  deriving(Eq, Show, Ord)
+-- | Return a trace-adjusted MH computation
+mhStepT_ :: PL (Trace x) -- ^ proposal
+         -> Trace x -- ^ current position
+         -> PL (Trace x)
+mhStepT_ mtx tx = do
+  -- | Return the original randomness, perturbed
+  trs' <- do
+      let l = length $ trs tx
+      ix <- choose [0..(l-1)]
+      r <- sample01
+      return $ replaceListAt ix r (trs tx)
+  -- | Run the original computation with the perturbation
+  tx' <- injectRandomness trs' mtx
+  let ratio = (tscore tx' * fromIntegral (length (trs tx'))) /
+                 (tscore tx * fromIntegral (length (trs tx)))
+  r <- sample01
+  return $ if r < ratio then tx' else tx
 
-scaleScore :: Float -> Score a -> Score a
-scaleScore s' (Score a s) = Score a (s * s')
-
-instance Functor Score where
-  fmap f (Score a s) = Score (f a) s
-
-
--- | Take a sample using metropolis hastings
-mhStep :: (x -> PL (Score x)) -- ^ proposal
-       -> PL (Score x) -- ^ current distribution
-       -> PL (Score x) -- ^ new distribution. sampled according to scores and proposal
-               --  of current distribution
-mhStep x2proposal mx =  do
-  (Score x s) <- mx
-  (Score x' s') <- x2proposal x
-  let alpha = s' / s
-  u <-  sample01
-  return $ if u < alpha then (Score x' s') else (Score x s)
-
-mhSteps ::  Int -- ^ number of steps
-  -> (x -> PL (Score x)) -- ^ proposal
-  -> PL (Score x) -- ^ current distribution
-  -> PL (Score x) -- ^ new distribution
-mhSteps steps x2proposal mx = (compose steps $ mhStep x2proposal) mx
-
--- | Convert a weighted sampler into a regular sampler by sampling using
--- metropolis-hastings
-mh :: MCMC x => PL (Score x) -> PL x
-mh plx = unscorePL $  mhSteps 10 (const plx) plx
+-- | Repeat monadic computation N times
+repeatM :: Monad m => Int -> (a -> m a) -> (a -> m a)
+repeatM 0 f x = return x
+repeatM n f x = f x >>= repeatM (n - 1) f
 
 
-mhD :: MCMC x => D x -> PL x
-mhD d = let pl = do
-                   x <- uniform2val <$> sample01
-                   let s = unP $ runD d x
-                   return $ Score x s
-        in unscorePL $ mhSteps 200 (const pl) pl
+-- | Transformer that adjusts a computation according to MH
+mhT_ :: Trace x -> PL (Trace x) -> PL (Trace x)
+mhT_ tx tmx = repeatM 10 (mhStepT_ tmx) $ tx
+
+-- | Find a starting position that does not have probability 0
+findNonZeroTrace :: PL (Trace x) -> PL (Trace x)
+findNonZeroTrace mtx = do
+  trx <- mtx
+  if tscore trx /= 0
+  then return $ trx
+  else findNonZeroTrace mtx
 
 
--- | hamiltonian monte carlo
-hmc :: PL a -> PL a
-hmc = undefined
+-- | run the computatation after taking weights into account
+weighted :: MCMC x => PL x -> PL [x]
+weighted mx =
+  let mtx = reifyTrace mx
+      go tx = do
+        tx' <- mhT_ tx mtx
+        liftA2 (:) (return tx) (go tx')
+        -- txs <- go tx'
+        -- return $ tx:txs
+  in do
+      tra <- findNonZeroTrace $ reifyTrace $ mx
+      tras <- go tra -- Need Applicative instance here!
+      return $ map tval tras
 
--- | Treat the program as a way to generate a Score
-sampleScore :: RandomGen g => g -> PL x -> (Score x, g)
-sampleScore g (Ret x) = (Score x 1.0, g)
-sampleScore g (Sample01 f2plx) =
-  let (r, g') = random g
-  in sampleScore g' (f2plx r)
-
--- | Get a single sample
-sample :: RandomGen g => g -> PL x -> (x, g)
-sample g plx =
-  let (px, g') = sampleScore g plx
-  in (unScore px, g')
-
--- | Take many samples
-samples :: RandomGen g => Int -> g -> PL x -> ([x], g)
-samples 0 g _ = ([], g)
-samples n g plx =
-  let (x, g') = sample g plx
-      (xs, g'') = samples (n-1) g' plx
-   in (x:xs, g'')
-
-
-
-{-
--- | Run the probabilistic value to get a sample
+-- | Run the computation in an _unweighted_ fashion, not taking
+-- scores into account
 sample :: RandomGen g => g -> PL a -> (a, g)
 sample g (Ret a) = (a, g)
-sample g (Sample01 f2plnext) = let (f, g') = random g in sample g' (f2plnext f)
-sample g (SampleAp ff fx) =
-    let (f, _) = sample g ff
-        xg3@(x, g3) = sample g fx
-    in f `par` (xg3 `par` (f x, g3))
-
-sample g (SampleBind fa a2fb)  =
-    let (a, g1) = sample g fa
-    in sample g1 (a2fb a)
+sample g (Sample01 f2plnext) =
+  let (f, g') = random g in sample g' (f2plnext f)
+sample g (Score f plx) = sample g plx
+sample g (Ap pla2x pla) =
+  let (a2x, g1) = sample g pla2x
+      (a, g2) = sample g pla
+   in (a2x a, g2)
 
 
--- | Sample n values from the distribution
+
 samples :: RandomGen g => Int -> g -> PL a -> ([a], g)
 samples 0 g _ = ([], g)
 samples n g pla = let (a, g') = sample g pla
                       (as, g'') = samples (n - 1) g' pla
                  in (a:as, g'')
--}
+
 
 -- | count fraction of times value occurs in list
 occurFrac :: (Eq a) => [a] -> a -> Float
@@ -293,8 +307,8 @@ printSamples s as =  do
     putStrLn $ "***" <> s
     putStrLn $ "   samples: " <> series2spark (map toRational as)
 
-printHistogram :: [Float] -> IO ()
-printHistogram samples = putStrLn $ series2spark (map fromIntegral . histogram 10 $  samples)
+printHistogam :: [Float] -> IO ()
+printHistogam samples = putStrLn $ series2spark (map fromIntegral . histogram 10 $  samples)
 
 
 -- | Given a coin bias, take samples and print bias
@@ -307,7 +321,7 @@ printCoin bias = do
 
 -- | Create normal distribution as sum of uniform distributions.
 normal :: PL Float
-normal =  fromIntegral . sum <$> (replicateM 100 (coin 0.5))
+normal =  fromIntegral . sum <$> (replicateM 1000 (coin 0.5))
 
 
 -- | This file can be copy-pasted and will run!
@@ -388,11 +402,12 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 -- flips seen so far. 1 or 0
 -- TODO: Think of using CPS to make you be able to scoreDistribution the distribution
 -- you are sampling from!
-predictCoinBias :: [Int] -> PL Float
-predictCoinBias flips = mh $ do
+predictCoinBias :: [Int] -> PL [Float]
+predictCoinBias flips = weighted $ do
   b <- sample01
-  let s = getProduct $ foldMap (\f -> Product $ if f == 1 then b else (1 - b)) flips
-  return $ Score b s
+  forM_ flips $ \f -> do
+    score $ if f == 1 then b else (1 - b)
+  return $ b
 
 data B = Z | O deriving(Eq, Show)
 type N = Integer
@@ -461,55 +476,58 @@ main = do
 
     putStrLn $ "biased dice : (x == 1 || x == 6)"
     let (mcmcsamples, _) =
-          samples 10 g
-            (mh $ (dice >>= \x -> conditioned (x <= 1 || x >= 6) x))
-    putStrLn $ "biased dice samples: " <> show mcmcsamples
-    printSamples "bised dice: " (fromIntegral <$> mcmcsamples)
+          sample g
+            (weighted $ (do
+                    x <- dice
+                    condition (x <= 1 || x >= 6)
+                    return x))
+    putStrLn $ "biased dice samples: " <> (show $ take 10 mcmcsamples)
+    printSamples "bised dice: " (fromIntegral <$> take 100 mcmcsamples)
 
     putStrLn $ "normal distribution using central limit theorem: "
     let (nsamples, _) = samples 1000 g normal
     -- printSamples "normal: " nsamples
-    printHistogram nsamples
+    printHistogam $  nsamples
 
 
     putStrLn $ "normal distribution using MCMC: "
-    let (mcmcsamples, _) = samples 1000 g (mhD $ normalD 0.5)
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (weighted $ d2pl $ normalD 0.5)
+    printHistogam $ take 1000 $  mcmcsamples
 
     putStrLn $ "sampling from x^4 with finite support"
-    let (mcmcsamples, _) = samples 1000 g (mhD $  polyD 4)
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (weighted $ d2pl $  polyD 4)
+    printHistogam $ take 1000  mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with []"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias [])
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias [])
+    printHistogam $ take 100 $ mcmcsamples
 
     putStrLn $ "bias distribution with supplied with [True]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias [1, 1])
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias [1, 1])
+    printHistogam $ take 100 $ mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [0] x 10"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 10 0))
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias (replicate 10 0))
+    printHistogam $ take 100 $ mcmcsamples
 
     putStrLn $ "bias distribution with supplied with [1] x 2"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 2 1))
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias (replicate 2 1))
+    printHistogam $ take 100 $ mcmcsamples
 
     putStrLn $ "bias distribution with supplied with [1] x 30"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (replicate 30 1))
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias (replicate 30 1))
+    printHistogam $ take 100 $ mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [0, 1]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 10 [0, 1]))
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias (mconcat $ replicate 10 [0, 1]))
+    printHistogam $ take 100 $ mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [1, 0]"
-    let (mcmcsamples, _) = samples 1000 g (predictCoinBias (mconcat $ replicate 20 [1, 0]))
-    printHistogram mcmcsamples
+    let (mcmcsamples, _) = sample g (predictCoinBias (mconcat $ replicate 20 [1, 0]))
+    printHistogam $ take 100 $ mcmcsamples
 
     putStrLn $ "there is some kind of exponentiation going on here, where adding a single sample makes things exponentially slower"
