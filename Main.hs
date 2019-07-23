@@ -129,9 +129,10 @@ condition True = score 1
 condition False = score 0
 
 -- | convert a distribution into a PL
-d2pl :: MCMC a => D a -> PL a
-d2pl d = do
-  a <- uniform2val <$> sample01
+d2pl :: (Float, Float) -> D Float -> PL Float
+d2pl (lo, hi) d = do
+  u <- sample01
+  let a = lo + u * (hi - lo)
   score $  d a
   return $ a
 
@@ -296,7 +297,7 @@ histogram nbuckets as =
         perbucket :: Float
         perbucket = (maxv - minv) / (fromIntegral nbuckets)
         bucket :: Float -> Int
-        bucket v = floor (v / perbucket)
+        bucket v = floor $ (v - minv) / perbucket
         bucketed :: M.Map Int Int
         bucketed = foldl (\m v -> M.insertWith (+) (bucket v) 1 m) mempty as
      in map snd . M.toList $ bucketed
@@ -321,7 +322,9 @@ printCoin bias = do
 
 -- | Create normal distribution as sum of uniform distributions.
 normal :: PL Float
-normal =  fromIntegral . sum <$> (replicateM 1000 (coin 0.5))
+normal =  do
+  xs <-(replicateM 1000 (coin 0.5))
+  return $ fromIntegral (sum xs) / 500.0
 
 
 -- | This file can be copy-pasted and will run!
@@ -409,58 +412,6 @@ predictCoinBias flips = weighted $ do
     score $ if f == 1 then b else (1 - b)
   return $ b
 
-data B = Z | O deriving(Eq, Show)
-type N = Integer
-
-type Cantor = N -> B
-
-cantorBit :: Num a => N -> Cantor -> a
-cantorBit i c = fromInteger. b2n $ c i
-
--- | truncate a number represented by `cantor` to an integer.
-cantorTrunc :: N -> Cantor -> Integer
-cantorTrunc n c = sum $ [(cantorBit i c) `shiftL` (fromIntegral i) | i <- [0..n]]
-
--- | Check if two functions defined from the cantor set are equal.
-eqCantor :: Eq x => (Cantor -> x) -> (Cantor -> x) -> Bool
-eqCantor f g = forevery $ \c -> f c == g c
-
--- | append a bit
-(#) :: Cantor -> B -> Cantor
-a # x = \i -> if i == 0 then x else a (i - 1)
-
-forsome :: (Cantor -> Bool) -> Bool
-forsome p = p (find p)
-
-forevery :: (Cantor -> Bool) -> Bool
-forevery p = not (forsome $ not . p)
-
-find :: (Cantor -> Bool) -> Cantor
-find p = if forsome(\a -> p (a # Z))
-         then find (\a -> p (a # Z)) # Z
-         else find (\a -> p (a # O)) # O
-
-search :: (Cantor -> Bool) -> Maybe Cantor
-search p = if forsome p then Just (find p) else Nothing
-
-z :: Cantor
-z = const Z
-
-b2n :: B -> N
-b2n Z = 0
-b2n O = 1
-
-f, g, h :: Cantor -> Integer
-
-f a = b2n (a (7 * b2n (a 4) +  4 * (b2n (a 7)) + 4))
-
-g a = b2n(a(b2n(a 4) + 11 * (b2n(a 7))))
-
-h a = if a 7 == Z
-      then if a 4 == Z then b2n(a  4) else b2n(a 11)
-      else if a 4 == O  then b2n(a 15) else b2n(a  8)
-
-
 main :: IO ()
 main = do
     let g = mkStdGen 1
@@ -491,21 +442,26 @@ main = do
 
 
     putStrLn $ "normal distribution using MCMC: "
-    let (mcmcsamples, _) = sample g (weighted $ d2pl $ normalD 0.5)
-    printHistogam $ take 1000 $  mcmcsamples
+    let (mcmcsamples, _) = sample g (weighted $ d2pl (-10, 10) $ normalD 0.5)
+    printHistogam $ take 10000 $  mcmcsamples
 
     putStrLn $ "sampling from x^4 with finite support"
-    let (mcmcsamples, _) = sample g (weighted $ d2pl $  polyD 4)
+    let (mcmcsamples, _) = sample g (weighted $ d2pl (0, 5)$  \x -> x ** 2)
     printHistogam $ take 1000  mcmcsamples
+
+
+    putStrLn $ "sampling from |sin(x)| with finite support"
+    let (mcmcsamples, _) = sample g (weighted $ d2pl (0, 6)$  \x -> abs (sin x))
+    printHistogam $ take 10000 mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with []"
     let (mcmcsamples, _) = sample g (predictCoinBias [])
-    printHistogam $ take 100 $ mcmcsamples
+    printHistogam $ take 1000 $ mcmcsamples
 
     putStrLn $ "bias distribution with supplied with [True]"
     let (mcmcsamples, _) = sample g (predictCoinBias [1, 1])
-    printHistogam $ take 100 $ mcmcsamples
+    printHistogam $ take 1000 $ mcmcsamples
 
 
     putStrLn $ "bias distribution with supplied with [0] x 10"
