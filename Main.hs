@@ -8,6 +8,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE MagicHash #-}
 import Control.Parallel
 import System.Random
 import Debug.Trace
@@ -18,7 +19,10 @@ import Control.Monad (replicateM)
 import Data.Monoid
 import Control.Monad
 import Data.Bits
+import GHC.Float
+import GHC.Exts
 import qualified Data.Map as M
+import Codec.Picture
 
 
 compose :: Int -> (a -> a) -> (a -> a)
@@ -400,10 +404,150 @@ nadd = nbinop (+) (\v dv v' dv' -> dv + dv')
 nmul :: Sym -> (Node, Node) -> Node
 nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 
+-- | 3 vector
+data Vec3 = Vec3 { vx :: Float, vy :: Float, vz :: Float }
+
+-- | get maximum component
+vmax :: Vec3 -> Float
+vmax (Vec3 vx vy vz) = foldl1 max [vx, vy, vz]
+
+-- | vector addition
+(^+) :: Vec3  -> Vec3 -> Vec3
+(^+) (Vec3 x y z) (Vec3 x' y' z') =
+  Vec3 (x + x') (y + y') (z + z')
+
+-- | vector subtraction
+(^-) :: Vec3 -> Vec3 -> Vec3
+(^-) x y = x ^+ ((-1.0) ^* y)
+
+-- | sclar multiplication
+(^*) :: Float -> Vec3 -> Vec3
+(^*) r (Vec3 x y z) =
+  Vec3 (x * r) (y * r) (z * r)
+
+-- | dot product
+(^.) :: Vec3 -> Vec3 -> Float
+(^.) (Vec3 x y z) (Vec3 x' y' z') = (x * x') + (y * y') + (z * z')
+
+veclensq :: Vec3 -> Float
+veclensq v = v ^. v
+
+-- | cross product
+cross :: Vec3 -> Vec3 -> Vec3
+cross (Vec3 x y z) (Vec3 x' y' z') =
+  let xnew = y * z' - z * y'
+      ynew = z * x' - x * z'
+      znew = x * y' - y * x'
+   in Vec3 xnew ynew znew
+
+vecnorm :: Vec3 -> Vec3
+vecnorm v =  (1.0 / (sqrt $ veclensq v)) ^*  v
+
+
+-- | zero vector
+zzz :: Vec3
+zzz = Vec3 0.0 0.0 0.0
+
+xzz :: Vec3
+xzz = Vec3 1.0 0.0 0.0
+
+zyz :: Vec3
+zyz = Vec3 0.0 1.0 0.0
+
+--  | ray with origin and direction
+data Ray = Ray { rorigin :: Vec3, rdir :: Vec3}
+
+-- | project the ray for some magnitude
+(-->) :: Ray -> Float -> Vec3
+Ray{..} --> d = rorigin ^+ (d ^* rdir)
+
+data Refl = Diff | Specular | Refract
+
+data Sphere =
+  Sphere { srad :: Float
+         , spos :: Vec3
+         , semission :: Vec3
+         , scolor :: Vec3
+         , srefl :: Refl
+         }
+
+
+-- | Get the normal vector from the center of a sphere to a point
+sphereNormal :: Sphere -> Vec3 -> Vec3
+sphereNormal Sphere{..} pos =
+  vecnorm $ pos ^- spos
+
+-- | List of spheres to render
+gspheres :: [Sphere]
+gspheres =
+  [ Sphere 1.0 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff
+  ]
+
+-- | epsilon
+eps :: Float
+eps = 0.0001
+
+-- | // Solve t^2*d.d + 2*t*(o-p).d + (o-p).(o-p)-R^2 = 0
+sintersect :: Ray -> Sphere -> Maybe Float
+sintersect Ray{..} Sphere{..} = do
+  let o = spos ^- rorigin  -- ^ original relative to ray corrdiates
+      b = o ^. rdir
+      det = b * b - (o ^. o) + srad * srad
+  guard $ det >= 0
+  let det' = sqrt det
+      tplus = b + det
+      tminus = b - det
+  if tminus > eps
+  then Just $ tminus
+  else if tplus > eps
+  then Just $ tplus
+  else Nothing
+
+
+-- | Return the smallest value from a list
+listmin :: (Ord o) => (a -> Maybe o) -> [a] -> Maybe (a, o)
+listmin f [] = Nothing
+listmin f (x:xs) = do
+  xcmp <- f x
+  (x', x'cmp) <- listmin f xs
+  pure $ if xcmp < x'cmp then (x, xcmp) else (x', x'cmp)
+
+-- | Get the closest sphere along a ray and the distance traveled
+closestSphere :: Ray ->  Maybe (Sphere, Float)
+closestSphere r = listmin (sintersect r) gspheres
+
+
+clamp01 :: Float -> Float
+clamp01 f
+  | f < 0 = 0
+  | f > 1 = f
+  | otherwise = f
+
+surface :: Ray -> Sphere -> Vec3 -> Vec3
+surface r s hitpoint = semission s
+
+-- | Given the ray, depth, and Xi, return the new color and Xi
+radiance :: Ray -> Int -> PL Vec3
+radiance r d =
+  case closestSphere r of
+    Nothing -> return $ zzz -- ^ black if nothing was hit
+    Just (sphere, t) -> do
+      let hitpoint = r --> t
+      if d > 5
+      then return $ zzz
+      else case srefl sphere of
+          Diff -> return $ surface r sphere hitpoint
+
+
+
+
+
+
 
 -- | A distribution over coin biases, given the data of the coin
 -- flips seen so far. 1 or 0
--- TODO: Think of using CPS to make you be able to scoreDistribution the distribution
+-- TODO: Think of using CPS to
+-- make you be able to scoreDistribution the distribution
 -- you are sampling from!
 predictCoinBias :: [Int] -> PL [Float]
 predictCoinBias flips = weighted $ do
@@ -411,6 +555,13 @@ predictCoinBias flips = weighted $ do
   forM_ flips $ \f -> do
     score $ if f == 1 then b else (1 - b)
   return $ b
+
+
+colorVecToPixel :: Vec3 -> PixelRGB8
+colorVecToPixel (Vec3 r g b) =
+  let f c = floor $ c * 255.0
+  in PixelRGB8 (f r) (f g) (f b)
+
 
 main :: IO ()
 main = do
@@ -487,3 +638,11 @@ main = do
     printHistogam $ take 100 $ mcmcsamples
 
     putStrLn $ "there is some kind of exponentiation going on here, where adding a single sample makes things exponentially slower"
+
+    let w =800
+    let h = 600
+    let cam = Ray (Vec3 0 0 0) (Vec3 0 0 1.0)
+    let imat x y = return $ (colorVecToPixel $ Vec3 1.0 0.0 0.0)
+
+    image <- withImage w h imat
+    writePng "raytrace.png" image
