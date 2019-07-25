@@ -432,6 +432,12 @@ vmax (Vec3 vx vy vz) = foldl1 max [vx, vy, vz]
 veclensq :: Vec3 -> Float
 veclensq v = v ^. v
 
+veclen :: Vec3 -> Float
+veclen = sqrt . veclensq
+
+cosine :: Vec3 -> Vec3 -> Float
+cosine v w = v ^. w / ((veclen v) * (veclen w))
+
 -- | cross product
 cross :: Vec3 -> Vec3 -> Vec3
 cross (Vec3 x y z) (Vec3 x' y' z') =
@@ -480,7 +486,8 @@ sphereNormal Sphere{..} pos =
 -- | List of spheres to render
 gspheres :: [Sphere]
 gspheres =
-  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff
+  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff,
+    Sphere 1.2 (Vec3 0.5 0.0 4.0) (Vec3 1.0 0.5 0.5) (Vec3 1.0 0.5 0.5) Diff
   ]
 
 -- | epsilon
@@ -535,14 +542,15 @@ clamp01 f
   | otherwise = f
 
 surface :: Ray -> Sphere -> Vec3 -> Vec3
-surface r s hitpoint = semission s
+surface r s hitpoint = let factor = abs (cosine (rdir r) (sphereNormal s hitpoint))
+ in factor ^* (semission s)
 
 -- | Given the ray, depth, return color
 radiance :: Ray -> Int -> PL Vec3
 radiance r d =
   case closestSphere r of
     Nothing -> return $ zzz -- ^ black if nothing was hit
-    Just (sphere, t) -> return $ Vec3 1 1 1
+    Just (s, rlen) -> return $ surface r s (r --> rlen) -- semission sphere
 
 
 
