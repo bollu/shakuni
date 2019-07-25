@@ -486,7 +486,7 @@ sphereNormal Sphere{..} pos =
 -- | List of spheres to render
 gspheres :: [Sphere]
 gspheres =
-  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff,
+  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 0.5 0.5 0.5) (Vec3 0.5 0.5 0.5) Diff,
     Sphere 1.2 (Vec3 0.5 0.0 4.0) (Vec3 1.0 0.5 0.5) (Vec3 1.0 0.5 0.5) Diff
   ]
 
@@ -541,16 +541,47 @@ clamp01 f
   | f > 1 = f
   | otherwise = f
 
-surface :: Ray -> Sphere -> Vec3 -> Vec3
-surface r s hitpoint = let factor = abs (cosine (rdir r) (sphereNormal s hitpoint))
+-- | Return the color of the surface of the sphere at this
+-- angle of the viewing ray, given the point of contact
+surfaceColor :: Ray -> Sphere -> Vec3 -> Vec3
+surfaceColor r s hitpoint = let factor = abs (cosine (rdir r) (sphereNormal s hitpoint))
  in factor ^* (semission s)
+
+-- | start a light ray, and give the color of the ray. If it's shadow,
+-- return shadow
+lightColor :: Ray -> Vec3
+lightColor r = case closestSphere r of
+                 Nothing -> zzz -- ^ shadow
+                 Just (s, rlen) -> (semission s) * (1.0 / (1.0 + rlen)) -- ^ return emissivity of sphere, considering it as a light source
+
+-- | blend the two colors: use BDRF?
+blendColor :: Vec3 -> Vec3 -> Vec3
+blendColor (Vec3 r g b) (Vec3 r' g' b') = Vec3 (r*r') (g*g') (b*b')
+
+-- | return a random ray in a hemisphere at a position
+randRayAt :: Vec3 -- ^ position
+          -> Vec3 -- ^ hemisphere normal
+          -> PL Vec3
+randRayAt p n = do
+  -- | angle to the normal vector
+  thetaToNormal <- (0.5 * pi *) <$> sample01
+  -- | pick a uniform angle on the circle picked by the theta to normal
+  thetaCircle <- (2.0 * pi *) <$> sample01
+  -- | right now, I'm going to fuck around and implement something somewhat incorrect
+  -- apply some small random perturbation to the given normal vector...
+  [r1, r2] <- replicateM 2 $ (\x -> (x - 0.5)*0.01) <$> sample01
+  let x' = vx n + r1
+  let y' = vx n + r2
+  return $ Ray p (Vec3 x' y' sqrt (1.0 - x*x - y*y))
+
 
 -- | Given the ray, depth, return color
 radiance :: Ray -> Int -> PL Vec3
 radiance r d =
   case closestSphere r of
-    Nothing -> return $ zzz -- ^ black if nothing was hit
-    Just (s, rlen) -> return $ surface r s (r --> rlen) -- semission sphere
+    Nothing -> return $ Vec3 1.0 1.0 1.0 -- ^ white if nothing was hit
+    Just (s, rlen) -> return $ do
+                        surfaceColor r s (r --> rlen) -- semission sphere
 
 
 
