@@ -480,37 +480,48 @@ sphereNormal Sphere{..} pos =
 -- | List of spheres to render
 gspheres :: [Sphere]
 gspheres =
-  [ Sphere 1.0 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff
+  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff
   ]
 
 -- | epsilon
 eps :: Float
 eps = 0.0001
 
--- | // Solve t^2*d.d + 2*t*(o-p).d + (o-p).(o-p)-R^2 = 0
+-- | solve quadratic and return the smaller root
+solveQuadratic :: Float -> Float -> Float -> [Float]
+solveQuadratic a b c =
+  let disc = b*b - 4*a*c
+   in if disc < 0
+      then []
+      else let r = (-b + sqrt disc) / (2 * a)
+               r' = (-b - sqrt disc) / (2 * a)
+            in [r, r']
+
+-- |x - spos|^2 = srad^2
+-- x = rorigin + t . rdir
+-- | we assume that the ray direction is *normalized*
 sintersect :: Ray -> Sphere -> Maybe Float
 sintersect Ray{..} Sphere{..} = do
   let o = spos ^- rorigin  -- ^ original relative to ray corrdiates
-      b = o ^. rdir
-      det = b * b - (o ^. o) + srad * srad
-  guard $ det >= 0
-  let det' = sqrt det
-      tplus = b + det
-      tminus = b - det
-  if tminus > eps
-  then Just $ tminus
-  else if tplus > eps
-  then Just $ tplus
-  else Nothing
+      a = rdir ^. rdir
+      b = -2.0 * (rdir ^. o)
+      c = o ^. o - srad * srad
+      roots = [r | r <- solveQuadratic a b c, r >= 0]
+   in case roots of
+        [] -> Nothing
+        [r] -> trace ("ROOT: " <> show r) $ Just r
+        [r, r'] -> trace ("ROOT: " <> show (min r r')) $ Just $ min r r'
 
 
 -- | Return the smallest value from a list
 listmin :: (Ord o) => (a -> Maybe o) -> [a] -> Maybe (a, o)
 listmin f [] = Nothing
-listmin f (x:xs) = do
-  xcmp <- f x
-  (x', x'cmp) <- listmin f xs
-  pure $ if xcmp < x'cmp then (x, xcmp) else (x', x'cmp)
+listmin f (x:xs) =
+  case (listmin f xs, f x) of
+    (other, Nothing) -> other
+    (Nothing, Just xcmp) -> Just (x, xcmp)
+    (Just (x', x'cmp), Just xcmp) ->
+          pure $ if xcmp < x'cmp then (x, xcmp) else (x', x'cmp)
 
 -- | Get the closest sphere along a ray and the distance traveled
 closestSphere :: Ray ->  Maybe (Sphere, Float)
@@ -526,17 +537,12 @@ clamp01 f
 surface :: Ray -> Sphere -> Vec3 -> Vec3
 surface r s hitpoint = semission s
 
--- | Given the ray, depth, and Xi, return the new color and Xi
+-- | Given the ray, depth, return color
 radiance :: Ray -> Int -> PL Vec3
 radiance r d =
   case closestSphere r of
     Nothing -> return $ zzz -- ^ black if nothing was hit
-    Just (sphere, t) -> do
-      let hitpoint = r --> t
-      if d > 5
-      then return $ zzz
-      else case srefl sphere of
-          Diff -> return $ surface r sphere hitpoint
+    Just (sphere, t) -> return $ Vec3 1 1 1
 
 
 
@@ -642,7 +648,12 @@ main = do
     let w =800
     let h = 600
     let cam = Ray (Vec3 0 0 0) (Vec3 0 0 1.0)
-    let imat x y = return $ (colorVecToPixel $ Vec3 1.0 0.0 0.0)
+    let imat screenx screeny = fst $ sample g $ do
+                     let realx = fromIntegral screenx / fromIntegral w - 0.5
+                     let realy = fromIntegral screeny / fromIntegral h - 0.5
+                     let dir = Ray (Vec3 0 0 0) (vecnorm $ Vec3 realx realy 1.0)
+                     color <- radiance dir 0
+                     pure $ (colorVecToPixel $ color)
 
-    image <- withImage w h imat
+    let image = generateImage imat w h
     writePng "raytrace.png" image
