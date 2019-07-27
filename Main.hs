@@ -505,7 +505,7 @@ gspheres =
     Sphere 5000000 (Vec3 0 0 (5000000+99)) (Vec3 0 1 0) zzz Diff, -- back
     Sphere 5000000 (Vec3 0 (5000000+10) 0) (Vec3 1 1 0) zzz Diff, -- bottom
     Sphere 5000000 (Vec3 0 (-5000000-10) 0) (Vec3 0 1 1) zzz Diff, -- top
-    Sphere 40 (Vec3 0 (-48) 50) (Vec3 1 0 1) zzz Diff -- light
+    Sphere 40 (Vec3 0 (-48) 50) (Vec3 1 1 1) zzz Diff -- light
   ]
 
 -- | epsilon
