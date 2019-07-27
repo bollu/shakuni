@@ -496,9 +496,15 @@ sphereNormal Sphere{..} pos =
 gspheres :: [Sphere]
 gspheres =
   --[ Sphere 0.2 (Vec3 0.0 0.0 (-2.0)) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff,
-  [ Sphere 0.8 (Vec3 0.0 (-0.5) 3.0) (Vec3 1.0 1.0 0.0) (Vec3 1.0 1.0 0.0) Diff,
-    Sphere 0.2 (Vec3 (-0.3) 0.0 2.0) (Vec3 1.0 0.0 0.0) (Vec3 1.0 0.0 0.0) Diff,
-    Sphere 0.2 (Vec3 0.3 0.0 2.0) (Vec3 0.0 0.0 1.0) (Vec3 0.0 0.0 1.0) Diff
+  [ -- Sphere 0.8 (Vec3 0.0 (-0.5) 3.0) zzz (Vec3 0 1 0) Refract,
+    -- Sphere 0.2 (Vec3 (-0.3) 0.0 2.0) zzz (Vec3 1.0 0.0 0.0) Diff,
+    -- Sphere 0.2 (Vec3 0.3 0.0 2.0) zzz (Vec3 0.0 0.0 1.0) Diff,
+    -- Sphere 0.2 (Vec3 0.0 0.0 1.5) zzz (Vec3 1.0 1.0 0.0) Refract,
+    Sphere 5000000 (Vec3 (-5000000-20) 0 0) (Vec3 0 0 1) zzz Diff, -- left
+    Sphere 5000000 (Vec3 (5000000+20) 0 0) (Vec3 1 0 0) zzz Diff, -- right
+    Sphere 5000000 (Vec3 0 0 (5000000+99)) (Vec3 0 1 0) zzz Diff, -- back
+    Sphere 5000000 (Vec3 0 (5000000+10) 0) (Vec3 1 1 0) zzz Diff, -- bottom
+    Sphere 5000000 (Vec3 0 (-5000000-10) 0) (Vec3 0 1 1) zzz Diff -- top
   ]
 
 -- | epsilon
@@ -561,18 +567,7 @@ surfaceColor :: Ray -> Sphere -> Vec3 -> Vec3
 surfaceColor r s hitpoint = let factor = abs (cosine (rdir r) (sphereNormal s hitpoint))
  in factor ^* (scolor s)
 
--- | start a light ray, and give the color of the ray. If it's shadow,
--- return shadow
-lightColor :: Ray -- ^ light ray direction
-           -> Vec3
-lightColor r = case closestSphere r of
-                 Nothing -> zzz -- ^ shadow
-                 Just (s, rlen) ->  (1.0 / (1.0 + rlen)) ^* (semission s) -- ^ return emissivity of sphere, considering it as a light source
-                 -- Just (s, rlen) ->  (semission s) -- ^ return emissivity of sphere, considering it as a light source
 
--- | blend the two colors: use BDRF?
-blendColor :: Vec3 -> Vec3 -> Vec3
-blendColor (Vec3 r g b) (Vec3 r' g' b') = Vec3 (r*r') (g*g') (b*b')
 
 -- | return a random ray in a hemisphere at a position
 randRayAt :: Vec3 -- ^ position
@@ -622,6 +617,10 @@ vecrejecton v vp = v ^- vecprojecton v vp
 vecReflect :: Vec3 -> Vec3 -> Vec3
 vecReflect v n = vecprojecton v n ^- vecrejecton v n
 
+-- | ramp the value, by creating "hard steps"
+ramp :: Int -> Float -> Float
+ramp i f = (fromIntegral (floor (f * fromIntegral i))) / (fromIntegral i)
+
 -- https://www.cs.cmu.edu/afs/cs/academic/class/15462-f09/www/lec/lec8.pdf
 -- https://maverick.inria.fr/~Nicolas.Holzschuch/cours/Slides/1b_Materiaux.pdf
 -- http://www.graphics.stanford.edu/courses/cs348b-01/course29.hanrahan.pdf
@@ -629,44 +628,46 @@ vecReflect v n = vecprojecton v n ^- vecrejecton v n
 mcpt :: (Ray, Float) -- ^ given ray and weight of ray
      -> Int -- ^ Given depth of number of bounces
      -> PL Vec3 -- ^ return final color
-mcpt (ray, w) 3 = return $ mempty
+mcpt (ray, w) 4 = return $ zzz
 mcpt (ray, w) depth = do
   case closestSphere ray of
     Nothing -> do
       score 0.1 -- we want to _avoid_ this region of program space!
-      return $  Vec3 1.0 1.0 1.0 -- if depth == 0 then Vec3 1.0 1.0 1.0 else Vec3 0.5 0.5 0.5 -- ^ global light is (0.5, 0.5, 0.5)
-    Just (sphere, raylen) -> do
-      shouldEmit <- (== 1) <$> coin 0.5
-      if shouldEmit
-      then return $ semission sphere
-      else do
+      return $  zzz
+    Just (sphere@Sphere{srefl=Refract}, raylen) -> do
+        let hitpoint = ray --> raylen
+        let normal = sphereNormal sphere hitpoint
+        let project = vecprojecton (rdir ray) normal
+        let reject = vecrejecton (rdir ray) normal
+
+        let refracted = (1.4 ^* project) ^+ reject
+        let rayReflected = Ray (hitpoint ^+ (0.01 ^* normal)) (vecReflect ((-1.0) ^* (rdir ray)) normal)
+        let rayRefracted = Ray (hitpoint ^+ (0.01 ^* refracted)) (vecnorm $ refracted)
+        refracted <- mcpt (rayRefracted, w) (depth + 1)
+        reflected <- mcpt (rayReflected, w) (depth + 1)
+        return $ v3map (ramp 4) $ (0.2 ^* reflected) ^+ (0.8 ^* refracted)
+
+    Just (sphere@Sphere{srefl=Specular}, raylen) -> do
+        let hitpoint = ray --> raylen
+        let normal = sphereNormal sphere hitpoint
+        let rayReflected = Ray (hitpoint ^+ (0.01 ^* normal)) (vecReflect ((-1.0) ^* (rdir ray)) normal)
+        return  $ error $ "unimplemented"
+
+    Just (sphere@Sphere{srefl=Diff}, raylen) -> do
         let hitpoint = ray --> raylen
         let normal = sphereNormal sphere hitpoint
         -- | ray going out
         let rayReflected = Ray (hitpoint ^+ (0.01 ^* normal)) (vecReflect ((-1.0) ^* (rdir ray)) normal)
 
         -- | local diffuse color
-        incomingrays <- replicateM 5 $ do
+        incomingrays <- replicateM 1 $ do
                   -- rayOutward <- -- randRayAt hitpoint normal
                   let rayOutward = rayReflected
                   color <- mcpt (rayOutward, w) (depth + 1)
-                  -- | flip the ray to become incoming ray
                   return $ (rayOutward, color)
-        let localDiffuse =
-              vecavg $ [ (clamp01 $ cosine (rdir rayOutward) normal) ^* colormul (scolor sphere) lightcolor | (rayOutward, lightcolor) <- incomingrays ]
-        return $ localDiffuse -- localEmission -- ^+ fromHemisphre ^+ localEmission
-
-
-
-
-
-
-
-
-
-
-
-
+        let incomingColor = vecavg $ [ (clamp01 $ cosine (rdir rayOutward) normal) ^* lightcolor | (rayOutward, lightcolor) <- incomingrays]
+        let localDiffuse = colormul (scolor sphere) incomingColor
+        return $ (semission sphere) ^+ (v3map (ramp 5) $ localDiffuse) -- localEmission -- ^+ fromHemisphre ^+ localEmission
 
 -- | A distribution over coin biases, given the data of the coin
 -- flips seen so far. 1 or 0
@@ -770,7 +771,7 @@ main = do
                      let realx = fromIntegral screenx / fromIntegral w - 0.5
                      let realy = fromIntegral screeny / fromIntegral h - 0.5
                      let dir = Ray (Vec3 0 0 0) (vecnorm $ Vec3 realx realy 1.0)
-                     let nsamples = 10
+                     let nsamples = 1
                      colors <- (replicateM nsamples $ mcpt (dir, 1.0) 0)
                      let color = mconcat colors ^/ fromIntegral nsamples
                      pure $ (colorVecToPixel $ color)

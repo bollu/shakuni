@@ -60,7 +60,7 @@ executable shakuni
   other-extensions:    GeneralizedNewtypeDeriving, GADTs, StandaloneDeriving, FlexibleContexts, FlexibleInstances, UndecidableInstances, DeriveFunctor
 
   -- Other library packages from which modules are imported.
-  build-depends:       base ^>=4.10.1.0, random ^>=1.1, containers ^>=0.5.10.2, parallel, JuicyPixels
+  build-depends:       base, random, containers, parallel, JuicyPixels
 
   -- Directories containing source files.
   -- hs-source-dirs:
