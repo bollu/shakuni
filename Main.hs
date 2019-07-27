@@ -16,7 +16,7 @@ import Control.Applicative
 import Data.List(sort, nub)
 import Data.Proxy
 import Control.Monad (replicateM)
-import Data.Monoid
+import Data.Monoid hiding(Ap)
 import Control.Monad
 import Data.Bits
 import GHC.Float
@@ -256,7 +256,7 @@ sample g (Sample01 f2plnext) =
 sample g (Score f plx) = sample g plx
 sample g (Ap pla2x pla) =
   let (a2x, g1) = sample g pla2x
-      (a, g2) = sample g pla
+      (a, g2) = sample g1 pla
    in (a2x a, g2)
 
 
@@ -407,6 +407,12 @@ nmul = nbinop (*) (\v (Der dv) v' (Der dv') -> Der $ (v*dv') + (v'*dv))
 -- | 3 vector
 data Vec3 = Vec3 { vx :: Float, vy :: Float, vz :: Float }
 
+instance Semigroup Vec3 where
+  (<>) = (^+)
+instance Monoid Vec3 where
+  mempty = zzz
+  mappend = (<>)
+
 -- | get maximum component
 vmax :: Vec3 -> Float
 vmax (Vec3 vx vy vz) = foldl1 max [vx, vy, vz]
@@ -424,6 +430,9 @@ vmax (Vec3 vx vy vz) = foldl1 max [vx, vy, vz]
 (^*) :: Float -> Vec3 -> Vec3
 (^*) r (Vec3 x y z) =
   Vec3 (x * r) (y * r) (z * r)
+
+(^/) :: Vec3 -> Float -> Vec3
+v ^/ r = (1.0 / r) ^* v
 
 -- | dot product
 (^.) :: Vec3 -> Vec3 -> Float
@@ -447,7 +456,7 @@ cross (Vec3 x y z) (Vec3 x' y' z') =
    in Vec3 xnew ynew znew
 
 vecnorm :: Vec3 -> Vec3
-vecnorm v =  (1.0 / (sqrt $ veclensq v)) ^*  v
+vecnorm v =  (1.0 / veclen v) ^*  v
 
 
 -- | zero vector
@@ -486,8 +495,10 @@ sphereNormal Sphere{..} pos =
 -- | List of spheres to render
 gspheres :: [Sphere]
 gspheres =
-  [ Sphere 0.5 (Vec3 0.0 0.0 2.0) (Vec3 0.5 0.5 0.5) (Vec3 0.5 0.5 0.5) Diff,
-    Sphere 1.2 (Vec3 0.5 0.0 4.0) (Vec3 1.0 0.5 0.5) (Vec3 1.0 0.5 0.5) Diff
+  --[ Sphere 0.2 (Vec3 0.0 0.0 (-2.0)) (Vec3 1.0 1.0 1.0) (Vec3 1.0 1.0 1.0) Diff,
+  [ Sphere 0.8 (Vec3 0.0 (-0.5) 3.0) (Vec3 1.0 1.0 0.0) (Vec3 1.0 1.0 0.0) Diff,
+    Sphere 0.2 (Vec3 (-0.3) 0.0 2.0) (Vec3 1.0 0.0 0.0) (Vec3 1.0 0.0 0.0) Diff,
+    Sphere 0.2 (Vec3 0.3 0.0 2.0) (Vec3 0.0 0.0 1.0) (Vec3 0.0 0.0 1.0) Diff
   ]
 
 -- | epsilon
@@ -516,8 +527,8 @@ sintersect Ray{..} Sphere{..} = do
       roots = [r | r <- solveQuadratic a b c, r >= 0]
    in case roots of
         [] -> Nothing
-        [r] -> trace ("ROOT: " <> show r) $ Just r
-        [r, r'] -> trace ("ROOT: " <> show (min r r')) $ Just $ min r r'
+        [r] -> Just r
+        [r, r'] ->  Just $ min r r'
 
 
 -- | Return the smallest value from a list
@@ -538,21 +549,26 @@ closestSphere r = listmin (sintersect r) gspheres
 clamp01 :: Float -> Float
 clamp01 f
   | f < 0 = 0
-  | f > 1 = f
+  | f > 1 = 1
   | otherwise = f
+
+vclamp01 :: Vec3 -> Vec3
+vclamp01 (Vec3 x y z) = Vec3 (clamp01 x) (clamp01 y) (clamp01 z)
 
 -- | Return the color of the surface of the sphere at this
 -- angle of the viewing ray, given the point of contact
 surfaceColor :: Ray -> Sphere -> Vec3 -> Vec3
 surfaceColor r s hitpoint = let factor = abs (cosine (rdir r) (sphereNormal s hitpoint))
- in factor ^* (semission s)
+ in factor ^* (scolor s)
 
 -- | start a light ray, and give the color of the ray. If it's shadow,
 -- return shadow
-lightColor :: Ray -> Vec3
+lightColor :: Ray -- ^ light ray direction
+           -> Vec3
 lightColor r = case closestSphere r of
                  Nothing -> zzz -- ^ shadow
-                 Just (s, rlen) -> (semission s) * (1.0 / (1.0 + rlen)) -- ^ return emissivity of sphere, considering it as a light source
+                 Just (s, rlen) ->  (1.0 / (1.0 + rlen)) ^* (semission s) -- ^ return emissivity of sphere, considering it as a light source
+                 -- Just (s, rlen) ->  (semission s) -- ^ return emissivity of sphere, considering it as a light source
 
 -- | blend the two colors: use BDRF?
 blendColor :: Vec3 -> Vec3 -> Vec3
@@ -561,7 +577,7 @@ blendColor (Vec3 r g b) (Vec3 r' g' b') = Vec3 (r*r') (g*g') (b*b')
 -- | return a random ray in a hemisphere at a position
 randRayAt :: Vec3 -- ^ position
           -> Vec3 -- ^ hemisphere normal
-          -> PL Vec3
+          -> PL Ray
 randRayAt p n = do
   -- | angle to the normal vector
   thetaToNormal <- (0.5 * pi *) <$> sample01
@@ -569,19 +585,82 @@ randRayAt p n = do
   thetaCircle <- (2.0 * pi *) <$> sample01
   -- | right now, I'm going to fuck around and implement something somewhat incorrect
   -- apply some small random perturbation to the given normal vector...
-  [r1, r2] <- replicateM 2 $ (\x -> (x - 0.5)*0.01) <$> sample01
+  r1 <- (\x -> (x - 0.5)*0.05) <$> sample01
+  r2 <- (\x -> (x - 0.5)*0.05) <$> sample01
   let x' = vx n + r1
   let y' = vx n + r2
-  return $ Ray p (Vec3 x' y' sqrt (1.0 - x*x - y*y))
+  let z' = sqrt (1.0 - x'*x' - y'*y')
+  -- | move the origin along the normal so it doesn't intersect the sphere again...
+  return $ Ray (p ^+ (0.01 ^* n)) n
+
+-- | Given colors and the viewing angle, get the final color
+mergeLightColors :: Vec3 -> Vec3 -> [Vec3] -> Vec3
+mergeLightColors view hitpoint vs =
+  vclamp01 $  foldl (^+) zzz vs
+
+v3map :: (Float -> Float) -> Vec3 -> Vec3
+v3map f (Vec3 x y z) = Vec3 (f x) (f y) (f z)
+colormul :: Vec3 -> Vec3 -> Vec3
+colormul (Vec3 x y z) (Vec3 x' y' z') = Vec3 (x*x') (y*y') (z*z')
+
+-- | take average of vectors
+vecavg :: [Vec3] -> Vec3
+vecavg [] = mempty
+vecavg vs = mconcat vs ^/ (fromIntegral $ length vs)
+
+-- | NOTE: assumes the vector we are projecting on is normalized
+vecprojecton :: Vec3 -- ^ vector to be projected
+             -> Vec3 -- ^ subspace on which we are projecting
+             -> Vec3
+vecprojecton v vp = let vpnorm = vecnorm vp in (v ^. vpnorm) ^* vpnorm
+
+-- | find the rejection of the vector along this diretion
+vecrejecton :: Vec3 -> Vec3 -> Vec3
+vecrejecton v vp = v ^- vecprojecton v vp
+
+-- | reflect the vector about another vector
+vecReflect :: Vec3 -> Vec3 -> Vec3
+vecReflect v n = vecprojecton v n ^- vecrejecton v n
+
+-- https://www.cs.cmu.edu/afs/cs/academic/class/15462-f09/www/lec/lec8.pdf
+-- https://maverick.inria.fr/~Nicolas.Holzschuch/cours/Slides/1b_Materiaux.pdf
+-- http://www.graphics.stanford.edu/courses/cs348b-01/course29.hanrahan.pdf
+-- | path trace
+mcpt :: (Ray, Float) -- ^ given ray and weight of ray
+     -> Int -- ^ Given depth of number of bounces
+     -> PL Vec3 -- ^ return final color
+mcpt (ray, w) 3 = return $ mempty
+mcpt (ray, w) depth = do
+  case closestSphere ray of
+    Nothing -> do
+      score 0.1 -- we want to _avoid_ this region of program space!
+      return $  Vec3 1.0 1.0 1.0 -- if depth == 0 then Vec3 1.0 1.0 1.0 else Vec3 0.5 0.5 0.5 -- ^ global light is (0.5, 0.5, 0.5)
+    Just (sphere, raylen) -> do
+      shouldEmit <- (== 1) <$> coin 0.5
+      if shouldEmit
+      then return $ semission sphere
+      else do
+        let hitpoint = ray --> raylen
+        let normal = sphereNormal sphere hitpoint
+        -- | ray going out
+        let rayReflected = Ray (hitpoint ^+ (0.01 ^* normal)) (vecReflect ((-1.0) ^* (rdir ray)) normal)
+
+        -- | local diffuse color
+        incomingrays <- replicateM 5 $ do
+                  -- rayOutward <- -- randRayAt hitpoint normal
+                  let rayOutward = rayReflected
+                  color <- mcpt (rayOutward, w) (depth + 1)
+                  -- | flip the ray to become incoming ray
+                  return $ (rayOutward, color)
+        let localDiffuse =
+              vecavg $ [ (clamp01 $ cosine (rdir rayOutward) normal) ^* colormul (scolor sphere) lightcolor | (rayOutward, lightcolor) <- incomingrays ]
+        return $ localDiffuse -- localEmission -- ^+ fromHemisphre ^+ localEmission
 
 
--- | Given the ray, depth, return color
-radiance :: Ray -> Int -> PL Vec3
-radiance r d =
-  case closestSphere r of
-    Nothing -> return $ Vec3 1.0 1.0 1.0 -- ^ white if nothing was hit
-    Just (s, rlen) -> return $ do
-                        surfaceColor r s (r --> rlen) -- semission sphere
+
+
+
+
 
 
 
@@ -691,7 +770,9 @@ main = do
                      let realx = fromIntegral screenx / fromIntegral w - 0.5
                      let realy = fromIntegral screeny / fromIntegral h - 0.5
                      let dir = Ray (Vec3 0 0 0) (vecnorm $ Vec3 realx realy 1.0)
-                     color <- radiance dir 0
+                     let nsamples = 10
+                     colors <- (replicateM nsamples $ mcpt (dir, 1.0) 0)
+                     let color = mconcat colors ^/ fromIntegral nsamples
                      pure $ (colorVecToPixel $ color)
 
     let image = generateImage imat w h
